@@ -48,13 +48,21 @@ def prepare_stage(stage_num):
         # maintain the same inode
         for root, dirs, files in os.walk(dest_dir):
             for fname in files:
-                if ".hardlink." not in fname:
-                    path = os.path.join(root, fname)
-                    prev_path = path.replace(dest_dir, dest_dir + ".tmp")
-                    if (os.path.exists(prev_path) and 
-                            os.system(f"diff -q { prev_path } { path } > /dev/null") == 0):
-                        os.unlink(path)
-                        os.link(prev_path, path)
+                if ".hardlink." in fname:
+                    continue
+                path = os.path.join(root, fname)
+                if ".rename_from." in fname:
+                    prev_path = os.path.join(root, fname.split('.rename_from.')[-1])
+                    prev_path = prev_path.replace(dest_dir, dest_dir + ".tmp")
+                    rename_to = os.path.join(root, fname.split('.rename_from.')[0])
+                    os.unlink(path)
+                    os.link(prev_path, rename_to)
+                    continue
+                prev_path = path.replace(dest_dir, dest_dir + ".tmp")
+                if (not path.endswith('.nolink') and os.path.exists(prev_path) and 
+                        os.system(f"diff -q { prev_path } { path } > /dev/null") == 0):
+                    os.unlink(path)
+                    os.link(prev_path, path)
         shutil.rmtree(dest_dir + ".tmp")
     # replace '+' with '.', replace : with '/'
     for root, _dirs, files in os.walk(dest_dir):
@@ -148,7 +156,9 @@ def verify_archive(archive_dir, expected_file, storage_id):
             else:
                 shamap[sha1] = os.lstat(arc_path).st_ino
     for obj in fileobjs:
-        assert obj['path'] in seen
+        if obj['path'] not in seen:
+            breakpoint()
+        assert obj['path'] in seen, f"{obj['path']} is in DB but not in archive"
 
 def verify_data(data_dir, db_file, exclude_file):
     con = sqlite3.connect(db_file)
@@ -176,7 +186,7 @@ def verify_data(data_dir, db_file, exclude_file):
             else:
                 with open(path, "rb") as _fh:
                     sha1 = hashlib.sha1(_fh.read()).hexdigest()
-            assert val['sha1'] == sha1
+            assert val['sha1'] == sha1, f"{path} SHA1 mismatch"
             assert os.lstat(path).st_ino == val['inode']
     for obj in fileobjs:
         assert obj['path'] in seen
@@ -236,14 +246,6 @@ def test_stage2_archive(monkeypatch, caplog):
     verify_db(os.path.join(archive_dir, ".backup_db.sqlite3"),
               expected_file, STORAGE_DIRS[2]['ID'])
 
-# TODO:
 # 2.a.1.a - rename (same disk)
-# 2.a.2.a - update/remove db only (identical sha)
 # 2.a.2.b - rename/overwrite (same disk)
-# 2.a.2.c - rename/overwrite (via actions)
-# 2.b.1.b - hardlink (via actions)
-# 2.b.2.a - update db only (identical sha)
-# 2.b.2.b - overwrite/hardlink (same disk)
-# 3.a     - same sha, different inode
 # 3.b.1   - file modified (same disk)
-# 5.a.2   - found duplicate item (via actions)

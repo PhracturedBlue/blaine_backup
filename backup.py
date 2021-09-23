@@ -194,6 +194,8 @@ class Backup:
     def path_unlink(self, path):
         """Remove path on storage disks (and remove par2 files)"""
         path = self.storage_path(path)
+        if not os.path.exists(path):
+            return
         os.unlink(path)
         if os.path.exists(path + ".par2"):
             os.unlink(path + ".par2")
@@ -373,6 +375,7 @@ class Backup:
                 #1: Exact match
                 self.skipped += 1
                 return False
+            # prefer path-match
             match = next((_ for _ in matches if _.size == lstat.st_size), None)
 
         self.cur.execute(
@@ -380,9 +383,9 @@ class Backup:
         item = self.cur.fetchone()
         if item:
             item = FileObj(*item)
-
         if match:
             if not os.path.exists(match.path):
+                # 2.a rename
                 if not item:
                     # 2.a.1: Destination does not exist in db
                     if match.storage_id == self.storage_id:
@@ -398,14 +401,14 @@ class Backup:
                     if match.sha1 == item.sha1:
                         # 2.a.2.a: inode changed, but no data change
                         self.update_db(item, path, lstat)
-                        self.remove_db(path)
+                        self.remove_db(match.path)
                     else:
                         if item.storage_id == self.storage_id:
                             # 2.a.2.b: sha1 mismatch, same storage device
                             self.path_unlink(path)
                             self.path_rename(match.path, path)
                             self.remove_db(path)
-                            self.update_db(item, path, lstat)
+                            self.update_db(match, match.path, lstat, newpath=path)
                         else:
                             # 2.a.2.c: sha1 mismatch, different storage device
                             self.append_action("DELETE", item.storage_id, path)
@@ -426,7 +429,7 @@ class Backup:
                     self.append_action("LINK", match.storage_id, match.path, path)
                     self.add_db(path, lstat, match.sha1, match.storage_id)
             else:
-                # 2.b.2: Destination path does exist
+                # 2.b.2: Destination path DOES exist
                 if match.sha1 == item.sha1:
                     # 2.b.2.a: inode changed, but no data change
                     self.update_db(item, path, lstat)
@@ -435,7 +438,7 @@ class Backup:
                         # 2.b.2.b: Mismatch sha1, storage Id is same as current
                         self.path_unlink(path)
                         self.path_hardlink(match.path, path)
-                        self.update_db(item, path, lstat)
+                        self.update_db(match, path, lstat)
                     else:
                         # 2.b.2.c: Mismatch sha1, storage Id is different
                         self.append_action("DELETE", item.storage_id, path)
@@ -443,6 +446,7 @@ class Backup:
                         self.append_action("LINK", item.storage_id, path)
             self.modified += 1
             return False
+        # match is none
         if item:
             if not is_symlink:
                 if item.size == lstat.st_size:
@@ -476,9 +480,11 @@ class Backup:
                 # 5.a.1:
                 os.unlink(self.storage_path(path))
                 self.path_hardlink(match.path, path)
+                self.update_db(match, path, lstat)
             else:
                 # 5.a.2:
                 os.unlink(self.storage_path(path))
+                self.update_db(matches[0], path, lstat)
                 self.append_action("LINK", matches[0].storage_id, matches[0].path, path)
             self.modified += 1
             return False
