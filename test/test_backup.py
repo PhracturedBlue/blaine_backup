@@ -14,10 +14,11 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import backup
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
+EXCLUDE_FILE = os.path.join(DATA_DIR, "snapraid.conf")
 STORAGE_DIRS = [
   {'ID': None, 'PATH': None},   # Used for common storage
-  {'ID': "de6912cf-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
-  {'ID': "8edfffa9-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
+  {'ID': "archive1-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
+  {'ID': "archive2-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
 ]
 INODE_MAP = {'last': 1000}
     
@@ -134,7 +135,7 @@ def verify_archive(archive_dir, expected_file, storage_id):
                 breakpoint()
             assert val
             if os.path.islink(arc_path):
-                orig_symlink = os.readlink(arc_path).replace(archive_dir, '').replace(DATA_DIR, orig_data_dir)
+                orig_symlink = os.readlink(arc_path)
                 sha1 = hashlib.sha1(orig_symlink.encode('utf8')).hexdigest()
             else:
                 if os.path.getsize(arc_path) != 0:
@@ -146,6 +147,37 @@ def verify_archive(archive_dir, expected_file, storage_id):
                 assert os.lstat(arc_path).st_ino == shamap[sha1]
             else:
                 shamap[sha1] = os.lstat(arc_path).st_ino
+    for obj in fileobjs:
+        assert obj['path'] in seen
+
+def verify_data(data_dir, db_file, exclude_file):
+    con = sqlite3.connect(db_file)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("SELECT * from files ORDER BY path ASC")
+    fileobjs = cur.fetchall()
+    con.close()
+    exclude = backup.parse_exclude(exclude_file)
+    seen = set()
+    for root, dirs, files in os.walk(data_dir):
+        filtered_dirs = []
+        for fname in files:
+            path = os.path.join(root, fname)
+            if any(_exc.search(path) for _exc in exclude):
+                continue
+            seen.add(path)
+            val = next((_ for _ in fileobjs if _['path'] == path), None)
+            if not val:
+                breakpoint()
+            assert val
+            if os.path.islink(path):
+                orig_symlink = os.readlink(path)
+                sha1 = hashlib.sha1(orig_symlink.encode('utf8')).hexdigest()
+            else:
+                with open(path, "rb") as _fh:
+                    sha1 = hashlib.sha1(_fh.read()).hexdigest()
+            assert val['sha1'] == sha1
+            assert os.lstat(path).st_ino == val['inode']
     for obj in fileobjs:
         assert obj['path'] in seen
 
@@ -171,39 +203,41 @@ def test_stage1_archive(monkeypatch, caplog):
     archive_dir = STORAGE_DIRS[1]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
+    expected_file = os.path.join(DATA_DIR, "stage1_db.json")
     monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
                                      "--dest", archive_dir,
-                                     "--conf", os.path.join(DATA_DIR, "snapraid.conf"),
+                                     "--conf", EXCLUDE_FILE, 
                                      data_dir])
     backup.main()
     warn_or_above = [_ for _ in caplog.record_tuples if _[1] > logging.INFO]
     assert not warn_or_above
-    verify_db(db_file, os.path.join(DATA_DIR, "stage1_db.json"))
-    verify_archive(archive_dir, os.path.join(DATA_DIR, "stage1_db.json"), STORAGE_DIRS[1]['ID'])
+    verify_db(db_file, expected_file)
+    verify_data(data_dir, db_file, EXCLUDE_FILE)
+    verify_archive(archive_dir, expected_file, STORAGE_DIRS[1]['ID'])
     verify_db(os.path.join(archive_dir, ".backup_db.sqlite3"),
-              os.path.join(DATA_DIR, "stage1_db.json"), STORAGE_DIRS[1]['ID'])
+              expected_file, STORAGE_DIRS[1]['ID'])
 
 def test_stage2_archive(monkeypatch, caplog):
     prepare_stage(2)
     archive_dir = STORAGE_DIRS[2]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
+    expected_file = os.path.join(DATA_DIR, "stage2_db.json")
     monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
                                      "--dest", archive_dir,
-                                     "--conf", os.path.join(DATA_DIR, "snapraid.conf"),
+                                     "--conf", EXCLUDE_FILE,
                                      data_dir])
     backup.main()
     warn_or_above = [_ for _ in caplog.record_tuples if _[1] > logging.INFO]
     assert not warn_or_above
-    verify_db(db_file, os.path.join(DATA_DIR, "stage2_db.json"))
-    verify_archive(archive_dir, os.path.join(DATA_DIR, "stage2_db.json"), STORAGE_DIRS[2]['ID'])
+    verify_db(db_file, expected_file)
+    verify_data(data_dir, db_file, EXCLUDE_FILE)
+    verify_archive(archive_dir, expected_file, STORAGE_DIRS[2]['ID'])
     verify_db(os.path.join(archive_dir, ".backup_db.sqlite3"),
-              os.path.join(DATA_DIR, "stage2_db.json"), STORAGE_DIRS[2]['ID'])
+              expected_file, STORAGE_DIRS[2]['ID'])
 
 # TODO:
-# 1 - symlink
 # 2.a.1.a - rename (same disk)
-# 2.a.1.b - rename (via actions)
 # 2.a.2.a - update/remove db only (identical sha)
 # 2.a.2.b - rename/overwrite (same disk)
 # 2.a.2.c - rename/overwrite (via actions)
