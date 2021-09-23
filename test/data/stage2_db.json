@@ -1,0 +1,119 @@
+{
+  "files": [
+    {
+      "path": "/archive/empty_file",
+      "inode": 1000,
+      "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "size": 0,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/file1",
+      "inode": 1001,
+      "sha1": "38be7d1b981f2fb6a4a0a052453f887373dc1fe8",
+      "size": 6,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir1/file1",
+      "inode": 1002,
+      "sha1": "5ab9a4f382fc786c21e08b4286defc9716fd686e",
+      "size": 14,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir1/ignore/file1",
+      "inode": 1003,
+      "sha1": "55dc79653ed44416e91a350a80fd81fdcdf64f60",
+      "size": 21,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir1/symlink_to_delete1",
+      "inode": 1004,
+      "sha1": "3dbfa70d2e1476b1165a59a8f634da855929dbd3",
+      "size": 10,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir2/copy_of_subdir1_file1",
+      "inode": 1008,
+      "sha1": "7da201da58dfcc90ccf2faf99502bab9eebc7aea",
+      "size": 20,
+      "storage_id": "8edfffa9-3dcc-49e9-a70e-8f6499426986"
+    },
+    {
+      "path": "/archive/subdir2/file2",
+      "inode": 1009,
+      "sha1": "1a2f9268d006ddbf4b884f692f53e9b63798cf21",
+      "size": 14,
+      "storage_id": "8edfffa9-3dcc-49e9-a70e-8f6499426986"
+    },
+    {
+      "path": "/archive/subdir2/symlink_subdir1_file1",
+      "inode": 1010,
+      "sha1": "9f04e4aec2ab974fd43656365708a7d8b555bb1e",
+      "size": 5,
+      "storage_id": "8edfffa9-3dcc-49e9-a70e-8f6499426986"
+    },
+    {
+      "path": "/archive/subdir3/change_link_inode",
+      "inode": 1002,
+      "sha1": "5ab9a4f382fc786c21e08b4286defc9716fd686e",
+      "size": 14,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/simple",
+      "inode": 1001,
+      "sha1": "38be7d1b981f2fb6a4a0a052453f887373dc1fe8",
+      "size": 6,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/symlink_file1",
+      "inode": 1011,
+      "sha1": "0970158107070376e2a3f9219fd416714cf9a745",
+      "size": 8,
+      "storage_id": "8edfffa9-3dcc-49e9-a70e-8f6499426986"
+    }
+  ],
+  "actions": [
+    {
+      "id": 1,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca",
+      "action": "DELETE",
+      "path": "/archive/subdir2/symlink_subdir1_file1",
+      "target_path": "NULL"
+    },
+    {
+      "id": 2,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca",
+      "action": "DELETE",
+      "path": "/archive/subdir2/copy_of_subdir1_file1",
+      "target_path": "NULL"
+    },
+    {
+      "id": 3,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca",
+      "action": "DELETE",
+      "path": "/archive/subdir3/change_link_inode",
+      "target_path": "NULL"
+    },
+    {
+      "id": 4,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca",
+      "action": "LINK",
+      "path": "/archive/subdir3/change_link_inode",
+      "target_path": "NULL"
+    },
+    {
+      "id": 5,
+      "storage_id": "de6912cf-e35d-45ee-a085-d9eddf7152ca",
+      "action": "DELETE",
+      "path": "/archive/subdir1/to_delete1",
+      "target_path": "NULL"
+    }
+  ],
+  "orig_data_dir": "/work/test/data"
+}

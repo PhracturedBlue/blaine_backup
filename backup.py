@@ -15,11 +15,26 @@
 # 1: Exact item is in db: no action
 # 2: Same inode/dev/size is in db:
 # 2.a: Original path no longer exists:
-# 2.a.1: Storage Id is same as current: rename in db, rename on storage disk
-# 2.a.2: Storage Id is different: rename in db, add Rename action
+# 2.a.1: Destination path does not exist
+# 2.a.1.a: Storage Id is same as current: rename in db, rename on storage disk
+# 2.a.1.b: Storage Id is different: rename in db, add Rename action
+# 2.a.2: Destination path does exist
+# 2.a.2.a: Destination and source have matching SHA1: update inode in db for new_path,
+#                                                     remove old path from db
+# 2.a.2.b: Mismatch sha1, storage Id is same as current: remove storage file, rename in db,
+#                                                        rename on storage disk
+# 2.a.2.c: Mismatch sha1, storage Id is different: add remove action, rename in db,
+#                                                  add rename action
 # 2.b: Original path still exists:
-# 2.b.1: Storage Id is same as current: add entry in db, hardlink on storage disk
-# 2.b.2: Storage Id is different: add entry in db, add hardlink action
+# 2.b.1: Destination path does not exist
+# 2.b.1.a: Storage Id is same as current: add entry in db, hardlink on storage disk
+# 2.b.1.b: Storage Id is different: add entry in db, add hardlink action
+# 2.b.2: Destination path does exist
+# 2.b.2.a: Destination and source have matching SHA1: update inode in db
+# 2.b.2.b: Mismatch sha1, storage Id is same as current: remove storage file,  add entry in db,
+#                                                        hardlink on storage disk
+# 2.b.2.c: Mismatch sha1, storage Id is different: add remove action, add in db,
+#                                                  add hardlink action
 # 3: Same path is in db (but different inode/dev), size matches
 # 3.a: Hash matches: update inode/dev in db
 # 3.b: Hash doesn't match:
@@ -76,7 +91,7 @@ def get_schema(cur):
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key PRIMARY KEY, value)")
     cur.execute("SELECT value FROM settings WHERE key = 'schema'")
     schema = cur.fetchone()
-    return  int(schema or 0)
+    return schema[0] if schema else 0
 
 def upgrade_schema(cur, old_schema):
     """Create/upgrade DB schema"""
@@ -93,16 +108,22 @@ def update_db(cur, dbobj, path, lstat, sha1=None, storage_id=None):
     """Update a file entry in the db"""
     # pylint: disable=too-many-arguments
     cur.execute("UPDATE files SET "
-                "(inode = ?, sha1 = ?, time = ?, size = ?, storage_id = ?) "
+                "inode = ?, sha1 = ?, time = ?, size = ?, storage_id = ? "
                 "WHERE path = ?",
                 (lstat.st_ino, sha1 or dbobj.sha1, lstat.st_mtime,
                  lstat.st_size, storage_id or dbobj.storage_id, path))
 
 def add_db(cur, path, lstat, sha1):
     """Add a new file entry in the DB"""
-    cur.execute("INSERT INTO files (path, inode, sha1, time, size, storage_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (path, lstat.st_ino, sha1, lstat.st_mtime, lstat.st_size, STORAGE_ID))
+    try:
+        cur.execute("INSERT INTO files (path, inode, sha1, time, size, storage_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (path, lstat.st_ino, sha1, lstat.st_mtime, lstat.st_size, STORAGE_ID))
+    except Exception as _e:
+        logging.error("Failed to add entry (path=%s, inode=%s, sha1=%s, time=%s, size=%s, "
+                      "storage_id=%s): %s",
+                      path, lstat.st_ino, sha1, lstat.st_mtime, lstat.st_size, STORAGE_ID, _e)
+        raise
 
 def remove_db(cur, path):
     """Remove a file entry from the DB"""
@@ -110,7 +131,10 @@ def remove_db(cur, path):
 
 def append_action(cur, action, storage_id, path1, path2=None):
     """Add a new action for a non-present archive disk to the action table"""
-    cur.execute("INSERT INFO actions (storage_id, action, path, target_path) VALUES (?, ?, ?, ?)",
+    if action not in ('RENAME', 'LINK', 'DELETE'):
+        logging.error("Unknown action: (%s, %s, %s)", action, path1, path2)
+        raise Exception(f"unsupported action: { action }")
+    cur.execute("INSERT INTO actions (storage_id, action, path, target_path) VALUES (?, ?, ?, ?)",
                 (storage_id, action, path1, f"'{ path2 }'" if path2 else "NULL"))
 
 def set_storage_id():
@@ -328,40 +352,76 @@ def handle_path(cur, path):
             CHANGED['skipped'] += 1
             return False
         match = next((_ for _ in matches if _.size == lstat.st_size), None)
-    if match:
-        if not os.path.exists(match.path):
-            if match.storage_id == STORAGE_ID:
-                # 2.a.1: Rename on disk
-                path_rename(match.path, path)
-                update_db(cur, match, path, lstat)
-            else:
-                # 2.a.2: Rename in db
-                append_action(cur, "RENAME", match.storage_id, match.path, path)
-                update_db(cur, match, path, lstat)
-            CHANGED['modified'] += 1
-            return False
-        # original path still exists
-        if match.storage_id == STORAGE_ID:
-            # 2.b.1: hardlink on disk
-            path_hardlink(match.path, path)
-            add_db(cur, path, lstat, match.sha1)
-        else:
-            # 2.b.2: hardlink in db
-            append_action(cur, "LINK", match.storage_id, match.path, path)
-            add_db(cur, path, lstat, match.sha1)
-        CHANGED['modified'] += 1
-        return False
+
     cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files WHERE path = ?", (path,))
     item = cur.fetchone()
     if item:
-        item = FileObj(*item)
-        if is_symlink:
-            if sha1 == item.sha1:
-                # 3.a: hash match
-                update_db(cur, item, path, lstat)
-                CHANGED['modified'] += 1
-                return False
+       item = FileObj(*item)
+
+    if match:
+        if not os.path.exists(match.path):
+            if not item:
+                # 2.a.1: Destination does not exist in db
+                if match.storage_id == STORAGE_ID:
+                    # 2.a.1.a: Rename on disk
+                    path_rename(match.path, path)
+                    update_db(cur, match, path, lstat)
+                else:
+                    # 2.a.1.b: Rename in db
+                    append_action(cur, "RENAME", match.storage_id, match.path, path)
+                    update_db(cur, match, path, lstat)
+            else:
+                # 2.a.2: Destination already exists in db
+                if match.sha1 == item.sha1:
+                    # 2.a.2.a: inode changed, but no data change
+                    update_db(cur, item, path, lstat)
+                    remove_db(cur, path)
+                else:
+                    if item.storage_id == STORAGE_ID:
+                        # 2.a.2.b: sha1 mismatch, same storage device
+                        path_unlink(path)
+                        path_rename(match.path, path)
+                        remove_db(cur, path)
+                        update_db(cur, item, path, lstat)
+                    else:
+                        # 2.a.2.c: sha1 mismatch, different storage device
+                        append_action(cur, "DELETE", item.storage_id, path)
+                        remove_db(cur, path)
+                        update_db(cur, match, path, lstat)
+                        append_action(cur, "RENAME", item.storage_id, path)
+            CHANGED['modified'] += 1
+            return False
+        # original path still exists
+        if not item:
+            # 2.b.1: Destination path does not exist
+            if match.storage_id == STORAGE_ID:
+                # 2.b.1.a: hardlink on disk
+                path_hardlink(match.path, path)
+                add_db(cur, path, lstat, match.sha1)
+            else:
+                # 2.b.1.b: hardlink in db
+                append_action(cur, "LINK", match.storage_id, match.path, path)
+                add_db(cur, path, lstat, match.sha1)
         else:
+            # 2.b.2: Destination path does exist
+            if match.sha1 == item.sha1:
+                # 2.b.2.a: inode changed, but no data change
+                update_db(cur, item, path, lstat)
+            else:
+                if match.storage_id == STORAGE_ID:
+                    # 2.b.2.b: Mismatch sha1, storage Id is same as current
+                    path.remove(path)
+                    path_hardlink(match.path, path)
+                    update_db(cur, item, path, lstat)
+                else:
+                    # 2.b.2.c: Mismatch sha1, storage Id is different
+                    append_action(cur, "DELETE", item.storage_id, path)
+                    update_db(cur, match, path, lstat)
+                    append_action(cur, "LINK", item.storage_id, path)
+        CHANGED['modified'] += 1
+        return False
+    if item:
+        if not is_symlink:
             if item.size == lstat.st_size:
                 sha1 = calc_hash(path)
                 if sha1 == item.sha1:
@@ -414,7 +474,7 @@ def clean_storage(cur, seen):
             path_unlink(item.path)
             remove.add(item.path)
         else:
-            append_action(cur, "UNLINK", obj.storage_id, item.path)
+            append_action(cur, "DELETE", item.storage_id, item.path)
             remove.add(item.path)
 
     for path in remove:
