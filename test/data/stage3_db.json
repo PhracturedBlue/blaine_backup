@@ -23,7 +23,7 @@
     },
     {
       "path": "/archive/subdir1/file_change_inode.nolink",
-      "inode": 1016,
+      "inode": 1022,
       "sha1": "0ffde8bc94be78570c240ef98789c87fc106bf33",
       "size": 33,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -78,7 +78,7 @@
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
-      "path": "/archive/subdir2/file_to_rename_same_disk",
+      "path": "/archive/subdir2/file_to_rename_same_disk_renamed",
       "inode": 1013,
       "sha1": "8ac3f7893ba515116afe8d68d4351d662c85ac42",
       "size": 33,
@@ -148,112 +148,6 @@
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     }
   ],
-  "actions": [
-    {
-      "id": 1,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir2/copy_of_subdir1_file1_to_edit",
-      "target_path": "NULL"
-    },
-    {
-      "id": 2,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "LINK",
-      "path": "/archive/subdir2/symlink_subdir1_file1",
-      "target_path": "/archive/subdir2/symlink_to_rename_hardlinked_newname"
-    },
-    {
-      "id": 3,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
-      "target_path": "NULL"
-    },
-    {
-      "id": 4,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir2/hardlink_to_changed_file",
-      "target_path": "NULL"
-    },
-    {
-      "id": 5,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "LINK",
-      "path": "/archive/subdir2/copy_of_subdir1_file1",
-      "target_path": "/archive/subdir2/new_copy_of_subdir1_file1"
-    },
-    {
-      "id": 6,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "LINK",
-      "path": "/archive/subdir1/file1",
-      "target_path": "/archive/subdir1/file_to_rename_hardlinked_newname"
-    },
-    {
-      "id": 7,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir1/file_to_rename_dup",
-      "target_path": "NULL"
-    },
-    {
-      "id": 8,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir1/file_to_rename_overwrite_dest",
-      "target_path": "NULL"
-    },
-    {
-      "id": 9,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "RENAME",
-      "path": "/archive/subdir1/file_to_rename_overwrite",
-      "target_path": "/archive/subdir1/file_to_rename_overwrite_dest"
-    },
-    {
-      "id": 10,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir3/change_link_inode",
-      "target_path": "NULL"
-    },
-    {
-      "id": 11,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "LINK",
-      "path": "/archive/subdir1/file1",
-      "target_path": "/archive/subdir3/change_link_inode"
-    },
-    {
-      "id": 12,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir2/symlink_to_rename_hardlinked",
-      "target_path": "NULL"
-    },
-    {
-      "id": 13,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir1/to_delete1",
-      "target_path": "NULL"
-    },
-    {
-      "id": 14,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir1/symlink_to_delete1",
-      "target_path": "NULL"
-    },
-    {
-      "id": 15,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
-      "action": "DELETE",
-      "path": "/archive/subdir1/file_to_rename_hardlinked",
-      "target_path": "NULL"
-    }
-  ],
+  "actions": [],
   "orig_data_dir": "/work/test/data"
 }

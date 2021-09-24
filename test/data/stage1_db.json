@@ -99,6 +99,13 @@
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
+      "path": "/archive/subdir2/file_to_rename_same_disk",
+      "inode": 1013,
+      "sha1": "8ac3f7893ba515116afe8d68d4351d662c85ac42",
+      "size": 33,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
       "path": "/archive/subdir2/hardlink_to_changed_file",
       "inode": 1012,
       "sha1": "5ab9a4f382fc786c21e08b4286defc9716fd686e",
@@ -114,21 +121,21 @@
     },
     {
       "path": "/archive/subdir2/symlink_subdir1_file1",
-      "inode": 1013,
-      "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
-      "size": 16,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
-    },
-    {
-      "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
       "inode": 1014,
       "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
       "size": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
-      "path": "/archive/subdir2/symlink_to_rename_handlinked",
-      "inode": 1013,
+      "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
+      "inode": 1015,
+      "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
+      "size": 16,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir2/symlink_to_rename_hardlinked",
+      "inode": 1014,
       "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
       "size": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"

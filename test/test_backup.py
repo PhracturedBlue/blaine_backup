@@ -208,12 +208,12 @@ def dump_dir_stats(dirname):
 #    dump_dir_stats(STORAGE_DIRS[0]['PATH'])
 #    assert True
 
-def test_stage1_archive(monkeypatch, caplog):
-    prepare_stage(1)
-    archive_dir = STORAGE_DIRS[1]['PATH']
+def run_stage(monkeypatch, caplog, stage, archive):
+    prepare_stage(stage)
+    archive_dir = STORAGE_DIRS[archive]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
-    expected_file = os.path.join(DATA_DIR, "stage1_db.json")
+    expected_file = os.path.join(DATA_DIR, f"stage{ stage }_db.json")
     monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
                                      "--dest", archive_dir,
                                      "--conf", EXCLUDE_FILE, 
@@ -223,29 +223,18 @@ def test_stage1_archive(monkeypatch, caplog):
     assert not warn_or_above
     verify_db(db_file, expected_file)
     verify_data(data_dir, db_file, EXCLUDE_FILE)
-    verify_archive(archive_dir, expected_file, STORAGE_DIRS[1]['ID'])
+    verify_archive(archive_dir, expected_file, STORAGE_DIRS[archive]['ID'])
     verify_db(os.path.join(archive_dir, ".backup_db.sqlite3"),
-              expected_file, STORAGE_DIRS[1]['ID'])
+              expected_file, STORAGE_DIRS[archive]['ID'])
+
+def test_stage1_archive(monkeypatch, caplog):
+    run_stage(monkeypatch, caplog, 1, 1)
 
 def test_stage2_archive(monkeypatch, caplog):
-    prepare_stage(2)
-    archive_dir = STORAGE_DIRS[2]['PATH']
-    db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
-    data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
-    expected_file = os.path.join(DATA_DIR, "stage2_db.json")
-    monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
-                                     "--dest", archive_dir,
-                                     "--conf", EXCLUDE_FILE,
-                                     data_dir])
-    backup.main()
-    warn_or_above = [_ for _ in caplog.record_tuples if _[1] > logging.INFO]
-    assert not warn_or_above
-    verify_db(db_file, expected_file)
-    verify_data(data_dir, db_file, EXCLUDE_FILE)
-    verify_archive(archive_dir, expected_file, STORAGE_DIRS[2]['ID'])
-    verify_db(os.path.join(archive_dir, ".backup_db.sqlite3"),
-              expected_file, STORAGE_DIRS[2]['ID'])
+    run_stage(monkeypatch, caplog, 2, 2)
 
-# 2.a.1.a - rename (same disk)
+def test_stage3_archive(monkeypatch, caplog):
+    run_stage(monkeypatch, caplog, 3, 1)
+# 2.a.1.b - rename (via actions)
 # 2.a.2.b - rename/overwrite (same disk)
 # 3.b.1   - file modified (same disk)

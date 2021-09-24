@@ -194,7 +194,7 @@ class Backup:
     def path_unlink(self, path):
         """Remove path on storage disks (and remove par2 files)"""
         path = self.storage_path(path)
-        if not os.path.exists(path):
+        if not os.path.lexists(path):
             return
         os.unlink(path)
         if os.path.exists(path + ".par2"):
@@ -263,9 +263,12 @@ class Backup:
         if action not in ('RENAME', 'LINK', 'DELETE'):
             logging.error("Unknown action: (%s, %s, %s)", action, path1, path2)
             raise Exception(f"unsupported action: { action }")
+        if not path2 and action != 'DELETE':
+            logging.error("No destination for action %s %s", action, path1)
+            raise Exception(f"No destination for action { action } { path1 }")
         self.cur.execute(
             "INSERT INTO actions (storage_id, action, path, target_path) VALUES (?, ?, ?, ?)",
-            (storage_id, action, path1, f"'{ path2 }'" if path2 else "NULL"))
+            (storage_id, action, path1, f"{ path2 }" if path2 else "NULL"))
 
     def sync_storage_db(self):
         """Apply any actions to storage_db, and sync files between dbs"""
@@ -287,7 +290,7 @@ class Backup:
             if action == 'RENAME':
                 try:
                     self.path_rename(path, target)
-                    s_cur.execute("UPDATE files SET path = ? WHERE path = ?", (path, target))
+                    s_cur.execute("UPDATE files SET path = ? WHERE path = ?", (target, path))
                 except Exception as _e:
                     logging.warning("Failed to apply rename action %s => %s: %s", path, target, _e)
                     break
@@ -322,7 +325,14 @@ class Backup:
         # Now handle files
         self.cur.execute("ATTACH ? AS storage_db", (storage_db,))
         self.cur.execute("DELETE FROM files WHERE storage_id = ?", (self.storage_id,))
-        self.cur.execute("INSERT INTO files SELECT * FROM storage_db.files")
+        self.cur.execute("SELECT files.path, files.storage_id, a.storage_id FROM files "
+                         "LEFT JOIN storage_db.files AS a ON files.path = a.path "
+                         "WHERE a.path IS NOT NULL")
+        duplicates = self.cur.fetchall()
+        for dup in duplicates:
+            logging.warning("Found conflicting path %s: %s <=> %s", *dup)
+        self.cur.execute("INSERT OR IGNORE INTO files SELECT * FROM storage_db.files")
+        self.cur.connection.commit()
         self.cur.execute("DETACH storage_db")
 
     def write_storage_db(self):
@@ -384,7 +394,7 @@ class Backup:
         if item:
             item = FileObj(*item)
         if match:
-            if not os.path.exists(match.path):
+            if not os.path.lexists(match.path):
                 # 2.a rename
                 if not item:
                     # 2.a.1: Destination does not exist in db
@@ -402,6 +412,8 @@ class Backup:
                         # 2.a.2.a: inode changed, but no data change
                         self.update_db(item, path, lstat)
                         self.remove_db(match.path)
+                        if match.storage_id != self.storage_id:
+                            self.append_action("DELETE", match.storage_id, match.path)
                     else:
                         if item.storage_id == self.storage_id:
                             # 2.a.2.b: sha1 mismatch, same storage device
@@ -414,7 +426,7 @@ class Backup:
                             self.append_action("DELETE", item.storage_id, path)
                             self.remove_db(path)
                             self.update_db(match, match.path, lstat, newpath=path)
-                            self.append_action("RENAME", item.storage_id, path)
+                            self.append_action("RENAME", item.storage_id, match.path, path)
                 self.modified += 1
                 return False
             # original path still exists
@@ -436,6 +448,8 @@ class Backup:
                 else:
                     if match.storage_id == self.storage_id:
                         # 2.b.2.b: Mismatch sha1, storage Id is same as current
+                        if item.storage_id != self.storage_id:
+                            self.append_action("DELETE", item.storage_id, path)
                         self.path_unlink(path)
                         self.path_hardlink(match.path, path)
                         self.update_db(match, path, lstat)
@@ -443,7 +457,7 @@ class Backup:
                         # 2.b.2.c: Mismatch sha1, storage Id is different
                         self.append_action("DELETE", item.storage_id, path)
                         self.update_db(match, path, lstat)
-                        self.append_action("LINK", item.storage_id, path)
+                        self.append_action("LINK", item.storage_id, match.path, path)
             self.modified += 1
             return False
         # match is none
