@@ -175,6 +175,7 @@ class Backup:
         logging.info("Added files:     %d", self.added)
         logging.info("Modified files:  %d", self.modified)
         logging.info("Removed files:   %d", self.removed)
+        logging.info("Space consumed:  %d bytes", self.storage_added)
 
     def storage_path(self, path):
         """Determine the path on the storage disk for a given path"""
@@ -575,7 +576,7 @@ class Backup:
                 continue
             self.removed += 1
             if item.storage_id == self.storage_id:
-                self.path_unlink(item.path, lstat)
+                self.path_unlink(item.path)
                 remove.add(item.path)
             else:
                 actions.append(["DELETE", item.storage_id, item.path])
@@ -611,6 +612,27 @@ def parse_cmdline():
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
     return args
 
+def backup_path(backup, basepath, exclude, seen):
+    """Run backup on a directory"""
+    backup.set_data_mount(basepath)
+    for root, dirs, files in os.walk(basepath):
+        filtered_dirs = []
+        for dirname in dirs:
+            path = os.path.join(root, dirname)
+            if any(_exc.search(path) for _exc in exclude):
+                logging.debug("Excluding %s", path)
+                continue
+            filtered_dirs.append(path)
+        dirs = filtered_dirs
+        for fname in files:
+            path = os.path.join(root, fname)
+            if any(_exc.search(path) for _exc in exclude):
+                logging.debug("Excluding %s", path)
+                continue
+            seen.add(path)
+            if backup.handle_path(path):
+                backup.calculate_par2(path)
+
 def main():
     """Entrypoint"""
     args = parse_cmdline()
@@ -625,25 +647,7 @@ def main():
         backup.sync_storage_db()
         seen = set()
         for basepath in args.paths:
-            backup.set_data_mount(basepath)
-            for root, dirs, files in os.walk(basepath):
-                filtered_dirs = []
-                for dirname in dirs:
-                    path = os.path.join(root, dirname)
-                    if any(_exc.search(path) for _exc in exclude):
-                        logging.debug("Excluding %s", path)
-                        continue
-                    filtered_dirs.append(path)
-                dirs = filtered_dirs
-                for fname in files:
-                    path = os.path.join(root, fname)
-                    if any(_exc.search(path) for _exc in exclude):
-                        logging.debug("Excluding %s", path)
-                        continue
-                    if args.clean:
-                        seen.add(path)
-                    if backup.handle_path(path):
-                        backup.calculate_par2(path)
+            backup_path(backup, basepath, exclude, seen)
         if args.clean:
             backup.clean_storage(seen)
         backup.write_storage_db()
