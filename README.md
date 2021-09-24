@@ -8,6 +8,10 @@ process.  It is targetted at disks which mostly grow in size, without significan
 delete operations.  Conceptually, it is a hybrid between tape-like storage and traditional backup
 solutions.  Additionally PAR2 parity is supported to provide additional resiliency.
 
+Blaine is NOT designed to provide rapid recovery.  It is more focused on catastrophic failure when
+as much data as possible can be recovered, but it is acceptable to wait for offline storage to
+become available.
+
 The archive process consists of the following parts:
   * Actions applied to the current storage disk:
     These are generaly file copy/move/delete/hardlink operations to copy data/changes
