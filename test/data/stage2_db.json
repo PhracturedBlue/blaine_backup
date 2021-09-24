@@ -23,7 +23,7 @@
     },
     {
       "path": "/archive/subdir1/file_change_inode.nolink",
-      "inode": 1016,
+      "inode": 1020,
       "sha1": "0ffde8bc94be78570c240ef98789c87fc106bf33",
       "size": 33,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -65,35 +65,42 @@
     },
     {
       "path": "/archive/subdir2/copy_of_subdir1_file1_to_edit",
-      "inode": 1017,
+      "inode": 1021,
       "sha1": "7da201da58dfcc90ccf2faf99502bab9eebc7aea",
       "size": 20,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
       "path": "/archive/subdir2/file2",
-      "inode": 1018,
+      "inode": 1022,
       "sha1": "1a2f9268d006ddbf4b884f692f53e9b63798cf21",
       "size": 14,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
-      "path": "/archive/subdir2/file_to_rename_same_disk",
+      "path": "/archive/subdir2/file_to_rename_diff_disk_newname",
       "inode": 1013,
+      "sha1": "cf1c20815b967800803bd8d225cd6195e0394a60",
+      "size": 33,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir2/file_to_rename_same_disk",
+      "inode": 1014,
       "sha1": "8ac3f7893ba515116afe8d68d4351d662c85ac42",
       "size": 33,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
       "path": "/archive/subdir2/hardlink_to_changed_file",
-      "inode": 1017,
+      "inode": 1021,
       "sha1": "7da201da58dfcc90ccf2faf99502bab9eebc7aea",
       "size": 20,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
       "path": "/archive/subdir2/new_copy_of_subdir1_file1",
-      "inode": 1019,
+      "inode": 1023,
       "sha1": "5ab9a4f382fc786c21e08b4286defc9716fd686e",
       "size": 14,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -107,21 +114,21 @@
     },
     {
       "path": "/archive/subdir2/symlink_subdir1_file1",
-      "inode": 1014,
+      "inode": 1015,
       "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
       "size": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
       "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
-      "inode": 1020,
+      "inode": 1024,
       "sha1": "cb99b709a1978bd205ab9dfd4c5aaa1fc91c7523",
       "size": 5,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
       "path": "/archive/subdir2/symlink_to_rename_hardlinked_newname",
-      "inode": 1014,
+      "inode": 1015,
       "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
       "size": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -134,6 +141,27 @@
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
+      "path": "/archive/subdir3/edited",
+      "inode": 1017,
+      "sha1": "451bec7861580c4a2af6c88dd2e281ca27374257",
+      "size": 14,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk",
+      "inode": 1018,
+      "sha1": "733d24c73f798342c9ad4ef5e26661cb405b5bff",
+      "size": 43,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk_dest",
+      "inode": 1019,
+      "sha1": "a239f1cf83385ae7af8313d4170b521169efa276",
+      "size": 48,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
       "path": "/archive/subdir3/simple",
       "inode": 1001,
       "sha1": "38be7d1b981f2fb6a4a0a052453f887373dc1fe8",
@@ -142,7 +170,7 @@
     },
     {
       "path": "/archive/subdir3/symlink_file1",
-      "inode": 1021,
+      "inode": 1025,
       "sha1": "f170e469d5afc4fd0116203882cd768449331d17",
       "size": 8,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
@@ -166,89 +194,96 @@
     {
       "id": 3,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
+      "action": "RENAME",
+      "path": "/archive/subdir2/file_to_rename_diff_disk",
+      "target_path": "/archive/subdir2/file_to_rename_diff_disk_newname"
+    },
+    {
+      "id": 4,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
       "target_path": "NULL"
     },
     {
-      "id": 4,
+      "id": 5,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir2/hardlink_to_changed_file",
       "target_path": "NULL"
     },
     {
-      "id": 5,
+      "id": 6,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "LINK",
       "path": "/archive/subdir2/copy_of_subdir1_file1",
       "target_path": "/archive/subdir2/new_copy_of_subdir1_file1"
     },
     {
-      "id": 6,
+      "id": 7,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "LINK",
       "path": "/archive/subdir1/file1",
       "target_path": "/archive/subdir1/file_to_rename_hardlinked_newname"
     },
     {
-      "id": 7,
+      "id": 8,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir1/file_to_rename_dup",
       "target_path": "NULL"
     },
     {
-      "id": 8,
+      "id": 9,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir1/file_to_rename_overwrite_dest",
       "target_path": "NULL"
     },
     {
-      "id": 9,
+      "id": 10,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "RENAME",
       "path": "/archive/subdir1/file_to_rename_overwrite",
       "target_path": "/archive/subdir1/file_to_rename_overwrite_dest"
     },
     {
-      "id": 10,
+      "id": 11,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir3/change_link_inode",
       "target_path": "NULL"
     },
     {
-      "id": 11,
+      "id": 12,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "LINK",
       "path": "/archive/subdir1/file1",
       "target_path": "/archive/subdir3/change_link_inode"
     },
     {
-      "id": 12,
+      "id": 13,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir2/symlink_to_rename_hardlinked",
       "target_path": "NULL"
     },
     {
-      "id": 13,
+      "id": 14,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir1/to_delete1",
       "target_path": "NULL"
     },
     {
-      "id": 14,
+      "id": 15,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir1/symlink_to_delete1",
       "target_path": "NULL"
     },
     {
-      "id": 15,
+      "id": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca",
       "action": "DELETE",
       "path": "/archive/subdir1/file_to_rename_hardlinked",

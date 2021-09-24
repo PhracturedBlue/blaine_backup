@@ -99,8 +99,15 @@
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
-      "path": "/archive/subdir2/file_to_rename_same_disk",
+      "path": "/archive/subdir2/file_to_rename_diff_disk",
       "inode": 1013,
+      "sha1": "cf1c20815b967800803bd8d225cd6195e0394a60",
+      "size": 33,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir2/file_to_rename_same_disk",
+      "inode": 1014,
       "sha1": "8ac3f7893ba515116afe8d68d4351d662c85ac42",
       "size": 33,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -121,21 +128,21 @@
     },
     {
       "path": "/archive/subdir2/symlink_subdir1_file1",
-      "inode": 1014,
-      "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
-      "size": 16,
-      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
-    },
-    {
-      "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
       "inode": 1015,
       "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
       "size": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
+      "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
+      "inode": 1016,
+      "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
+      "size": 16,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
       "path": "/archive/subdir2/symlink_to_rename_hardlinked",
-      "inode": 1014,
+      "inode": 1015,
       "sha1": "d3c3a63efcd7352e501c5ad769207997417099b2",
       "size": 16,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -145,6 +152,27 @@
       "inode": 1001,
       "sha1": "38be7d1b981f2fb6a4a0a052453f887373dc1fe8",
       "size": 6,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/edited",
+      "inode": 1017,
+      "sha1": "451bec7861580c4a2af6c88dd2e281ca27374257",
+      "size": 14,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk",
+      "inode": 1018,
+      "sha1": "733d24c73f798342c9ad4ef5e26661cb405b5bff",
+      "size": 43,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk_dest",
+      "inode": 1019,
+      "sha1": "a239f1cf83385ae7af8313d4170b521169efa276",
+      "size": 48,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {

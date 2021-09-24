@@ -223,6 +223,10 @@ class Backup:
     def calculate_par2(self, path):
         """Run PAR2 on path to generate extra parity"""
         path = self.storage_path(path)
+        if os.path.lexists(path + ".par2"):
+            os.unlink(path + ".par2")
+            for vol in glob.glob(f"{ path }.vol*.par2"):
+                os.unlink(vol)
         try:
             subprocess.run([PAR2, 'c', path],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)

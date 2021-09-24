@@ -235,6 +235,3 @@ def test_stage2_archive(monkeypatch, caplog):
 
 def test_stage3_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 3, 1)
-# 2.a.1.b - rename (via actions)
-# 2.a.2.b - rename/overwrite (same disk)
-# 3.b.1   - file modified (same disk)
