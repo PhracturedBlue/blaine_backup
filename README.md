@@ -1,6 +1,6 @@
-= Blaine Backup
+# Blaine Backup
 
-** NOTE:  Blaine Backup is still in early development.  Use at your own risk **
+**NOTE:  Blaine Backup is still in early development.  Use at your own risk**
 
 Blaine Backup is a disk backup solution designed specifcially to backup media disks incrementally.
 It can backup onto multiple disks and does not require that they all be online during the backup
@@ -19,7 +19,7 @@ The archive process consists of the following parts:
     deferred actions
   * A SQLITE3 database on each archive disk maintaining the files contained within
 
-== Use case
+## Use case
 Blaine Backup was specifcially designed to be used with Snapraid and MergerFS although there are
 no limitations that it be used with thse technologies.  The concept is to initially backup very
 large data sets onto multiple disks, and then store those off premises.  Future backups can be done
@@ -43,7 +43,7 @@ can be periodically swapped.  For example:
 
 With the above process, at any given time, the maximum amount of data lost is the 1-week difference between DiskC and DiskC'
 
-== Archive process
+## Archive process
  * Apply any deferred actions that are needed to the current archive disk
  * Iterate over each file in the path to archive
    * If the file has been previously archived and is unchanged, skip
@@ -63,12 +63,12 @@ With the above process, at any given time, the maximum amount of data lost is th
  * Save the database containing the complete state of the archive as well as all deferred actions
    onto the host system
 
-== Requirements
+## Requirements
   * python >= 3.6
   * dc3dd : Fast copy & checksum in a single step
   * par2 : Calculate parity to avoid bitrot
 
-== Other considertations
+## Other considertations
 
 There are enterprise level archive solutions that can do most of what Blaine can do such as Amanda
 or Bacula.  However, they tend to be complicated to setup and maintain, and none offer all the
