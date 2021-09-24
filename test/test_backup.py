@@ -235,3 +235,22 @@ def test_stage2_archive(monkeypatch, caplog):
 
 def test_stage3_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 3, 1)
+
+def test_write_storage_id():
+    with tempfile.TemporaryDirectory() as _td:
+        storage_id = backup._set_storage_id(_td)
+        assert os.path.exists(os.path.join(_td, ".backup_id"))
+        storage_id2 = backup._set_storage_id(_td)
+        assert storage_id == storage_id2
+
+def test_invalid_action():
+    try:
+        backup.Backup.append_action(None, "INVALID", "storage_id", "path1", "path2")
+        assert False, "Expected exception fom append_action"
+    except Exception as _e:
+        assert str(_e) == "unsupported action: INVALID"
+    try:
+        backup.Backup.append_action(None, "RENAME", "storage_id", "path1", None)
+        assert False, "Expected exception fom append_action"
+    except Exception as _e:
+        assert str(_e) == "No destination for action RENAME path1"
