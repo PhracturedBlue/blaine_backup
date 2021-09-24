@@ -79,6 +79,9 @@ DC3DD_HLOG = f"/tmp/dc3dd.log.{ os.getpid() }"
 
 FileObj = namedtuple("FileObj", ["path", "inode", "sha1", "time", "size", "storage_id"])
 
+class BackupException(Exception):
+    """Base Exception"""
+
 def get_schema(cur):
     """Fetch current DB schema"""
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key PRIMARY KEY, value)")
@@ -94,7 +97,7 @@ def upgrade_schema(cur, old_schema):
         cur.execute("CREATE TABLE actions "
                     "(id INTEGER PRIMARY KEY AUTOINCREMENT, storage_id, action, path, target_path)")
     else:
-        raise Exception(f"Unsupported old schema: {old_schema}")
+        raise BackupException(f"Unsupported old schema: {old_schema}")
     cur.execute(f"REPLACE INTO settings (key, value) VALUES('schema', { SCHEMA })")
 
 def run_dc3dd(src, dest):
@@ -135,10 +138,17 @@ def _set_storage_id(storage_root):
             _fh.write(storage_id)
         return storage_id
 
+def get_storage_free(storage_root):
+    """Determine free space of the archive disk"""
+    stvfs = os.statvfs(storage_root)
+    free  = (stvfs.f_bavail * stvfs.f_frsize)
+    free_inode = stvfs.f_ffree
+    return free, free_inode
+
 class Backup:
     """Execute a backup"""
     # pylint: disable = too-many-instance-attributes
-    def __init__(self, cur, storage_dir):
+    def __init__(self, cur, storage_dir, reserved_space=None, parity_pct=None):
         """Initialize"""
         self.skipped = 0
         self.added = 0
@@ -147,6 +157,10 @@ class Backup:
         self.cur = cur
         self.storage_root = storage_dir
         self.storage_id = _set_storage_id(storage_dir)
+        self.storage_added = 0
+        self.storage_reserved = 10_000_000_000 if reserved_space is None else reserved_space
+        self.inodes_reserved = 1000
+        self.parity_ratio = 1 + (10 if parity_pct is None else parity_pct) / 100
         self.data_mount = None
 
     def set_data_mount(self, path):
@@ -172,40 +186,61 @@ class Backup:
         """Rename path on storage disks (and update par2 files)"""
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
-        os.rename(origpath, newpath)
-        if os.path.exists(origpath + ".par2"):
-            os.rename(origpath + ".par2", newpath + ".par2")
-            for path in glob.glob(f"{ origpath }.vol*.par2"):
-                npath = newpath + path[len(origpath):]
-                os.rename(path, npath)
+        try:
+            os.rename(origpath, newpath)
+            if os.path.exists(origpath + ".par2"):
+                os.rename(origpath + ".par2", newpath + ".par2")
+                for path in glob.glob(f"{ origpath }.vol*.par2"):
+                    npath = newpath + path[len(origpath):]
+                    os.rename(path, npath)
+        except Exception as _e:
+            raise BackupException(f"Failed to rename {origpath} -> {newpath}: {str(_e)}") from _e
 
     def path_hardlink(self, origpath, newpath):
         """Hardlink path on storage disks (and update par2 files)"""
+        _free, free_inodes = get_storage_free(self.storage_root)
+        if free_inodes < self.inodes_reserved:
+            raise BackupException(f"Disk {self.storage_root}  has run out of inodes")
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
-        os.makedirs(os.path.dirname(newpath), exist_ok=True)
-        os.link(origpath, newpath)
-        if os.path.exists(origpath + ".par2"):
-            os.link(origpath + ".par2", newpath + ".par2")
-            for path in glob.glob(f"{ origpath }.vol*.par2"):
-                npath = newpath + path[len(origpath):]
-                os.link(path, npath)
+        try:
+            os.makedirs(os.path.dirname(newpath), exist_ok=True)
+            os.link(origpath, newpath)
+            if os.path.exists(origpath + ".par2"):
+                os.link(origpath + ".par2", newpath + ".par2")
+                for path in glob.glob(f"{ origpath }.vol*.par2"):
+                    npath = newpath + path[len(origpath):]
+                    os.link(path, npath)
+        except Exception as _e:
+            for _p in newpath, newpath + ".par2", glob.glob(f"{ newpath }.vol*.par2"):
+                try:
+                    os.unlink(newpath)
+                except Exception:
+                    pass
+            raise BackupException(f"Failed to hardlink {origpath} -> {newpath}: {str(_e)}") from _e
 
-    def path_unlink(self, path):
+    def path_unlink(self, path, lstat=None):
         """Remove path on storage disks (and remove par2 files)"""
         path = self.storage_path(path)
         if not os.path.lexists(path):
             return
-        os.unlink(path)
-        if os.path.exists(path + ".par2"):
-            os.unlink(path + ".par2")
-        for par2path in glob.glob(f"{ path }.vol*.par2"):
-            os.unlink(par2path)
+        if not lstat:
+            lstat = os.lstat(path)
+        try:
+            os.unlink(path)
+            self.storage_added -= lstat.st_size
+            self.rm_par2(path)
+        except Exception as _e:
+            raise BackupException(f"Failed to delete {path}: {str(_e)}") from _e
 
-
-    def path_copy(self, path):
+    def path_copy(self, path, lstat):
         """Copy path from original location to storage disk and calculate sha1
            (but don't calculate par2)"""
+        free, free_inodes = get_storage_free(self.storage_root)
+        if free < lstat.st_size * self.parity_ratio + self.storage_reserved:
+            raise BackupException(f"File {path} won't fit on storage disk {self.storage_root}")
+        if free_inodes < self.inodes_reserved:
+            raise BackupException(f"Disk {self.storage_root}  has run out of inodes")
         dest = self.storage_path(path)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         try:
@@ -215,23 +250,43 @@ class Backup:
                 sha1 = calc_symlink_hash(path)
             else:
                 sha1 = run_dc3dd(path, dest)
+                # Python doesn't proide 'lutime' function, so no easy way to update symlinks
+                os.utime(dest, (lstat.st_atime, lstat.st_mtime))
+            self.storage_added += lstat.st_size
         except Exception as _e:
-            logging.error("Failed to copy %s -> %s: %s", path, dest, _e)
-            return None
+            try:
+                os.unlink(dest)
+            except Exception:
+                pass
+            raise BackupException(f"Failed to copy {path} -> {dest}: {str(_e)}") from _e
         return sha1
+
+    def rm_par2(self, storage_path):
+        """Remove par2 files, and update stats"""
+        if os.path.exists(storage_path + ".par2"):
+            lstat_p = os.lstat(storage_path + ".par2")
+            os.unlink(storage_path + ".par2")
+            self.storage_added -= lstat_p.st_size
+        for par2path in glob.glob(f"{ storage_path }.vol*.par2"):
+            lstat_p = os.lstat(par2path)
+            os.unlink(par2path)
+            self.storage_added -= lstat_p.st_size
 
     def calculate_par2(self, path):
         """Run PAR2 on path to generate extra parity"""
         path = self.storage_path(path)
-        if os.path.lexists(path + ".par2"):
-            os.unlink(path + ".par2")
-            for vol in glob.glob(f"{ path }.vol*.par2"):
-                os.unlink(vol)
         try:
+            self.rm_par2(path)
             subprocess.run([PAR2, 'c', path],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            if os.path.exists(path + ".par2"):
+                lstat_p = os.lstat(path + ".par2")
+                self.storage_added += lstat_p.st_size
+                for par2path in glob.glob(f"{ path }.vol*.par2"):
+                    lstat_p = os.lstat(par2path)
+                    self.storage_added += lstat_p.st_size
         except Exception as _e:
-            logging.error("Failed to create par2 files for %s: %s", path, _e)
+            raise BackupException(f"Failed to create par2 files for {path}: {str(_e)}") from _e
 
     def update_db(self, dbobj, path, lstat, sha1=None, storage_id=None, newpath=None):
         """Update a file entry in the db"""
@@ -421,7 +476,7 @@ class Backup:
                     else:
                         if item.storage_id == self.storage_id:
                             # 2.a.2.b: sha1 mismatch, same storage device
-                            self.path_unlink(path)
+                            self.path_unlink(path, lstat)
                             self.path_rename(match.path, path)
                             self.remove_db(path)
                             self.update_db(match, match.path, lstat, newpath=path)
@@ -454,7 +509,7 @@ class Backup:
                         # 2.b.2.b: Mismatch sha1, storage Id is same as current
                         if item.storage_id != self.storage_id:
                             self.append_action("DELETE", item.storage_id, path)
-                        self.path_unlink(path)
+                        self.path_unlink(path, lstat)
                         self.path_hardlink(match.path, path)
                         self.update_db(match, path, lstat)
                     else:
@@ -477,17 +532,17 @@ class Backup:
             # if item.size != lstat.st_size or item.sha1 != sha1
             if item.storage_id == self.storage_id:
                 # 3.b.1 or 4.a: Modified file
-                sha1 = self.path_copy(path)
+                sha1 = self.path_copy(path, lstat)
                 self.update_db(item, path, lstat, sha1, self.storage_id)
             else:
                 # 3.b.2 or 4.b: Modified file
-                sha1 = self.path_copy(path)
+                sha1 = self.path_copy(path, lstat)
                 self.update_db(item, path, lstat, sha1, self.storage_id)
                 self.append_action("DELETE", item.storage_id, path)
             self.modified += 1
             return needs_par2
         # 5: Path is not in db
-        sha1 = self.path_copy(path)
+        sha1 = self.path_copy(path, lstat)
         self.add_db(path, lstat, sha1)
         self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files "
                          "WHERE sha1 = ? and size = ? and path != ?", (sha1, lstat.st_size, path))
@@ -520,7 +575,7 @@ class Backup:
                 continue
             self.removed += 1
             if item.storage_id == self.storage_id:
-                self.path_unlink(item.path)
+                self.path_unlink(item.path, lstat)
                 remove.add(item.path)
             else:
                 actions.append(["DELETE", item.storage_id, item.path])
@@ -592,6 +647,9 @@ def main():
         if args.clean:
             backup.clean_storage(seen)
         backup.write_storage_db()
+    except BackupException as _e:
+        logging.error(_e)
+        raise
     finally:
         sqldb.commit()
         sqldb.close()
