@@ -91,8 +91,15 @@ STORAGE_BACKUP_ENC = ".encrypt"
 STORAGE_BACKUP_DEC = "data"
 FileObj = namedtuple("FileObj", ["path", "inode", "sha1", "time", "size", "storage_id"])
 
+# Convert unsigned 64bit inodes to signed for sqlite3
+sqlite3.register_adapter(int, lambda i: (i + 2**63) % 2**64 - 2**63)
+sqlite3.register_converter('integer', lambda i: int(i) % 2**64)
+
 class BackupException(Exception):
     """Base Exception"""
+
+class DiskFullException(Exception):
+    """Disk-Full Exception"""
 
 class EncryptionException(Exception):
     """Encryption Exception"""
@@ -338,7 +345,7 @@ class Backup:
         """Hardlink path on storage disks (and update par2 files)"""
         _free, free_inodes = get_storage_free(self.storage_root)
         if free_inodes < self.inodes_reserved:
-            raise BackupException(f"Disk {self.storage_root}  has run out of inodes")
+            raise DiskFullException(f"Disk {self.storage_root}  has run out of inodes")
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
         logging.debug("Hardlinking %s to %s", origpath, newpath)
@@ -378,9 +385,9 @@ class Backup:
            (but don't calculate par2)"""
         free, free_inodes = get_storage_free(self.storage_root)
         if free < lstat.st_size * self.parity_ratio + self.storage_reserved:
-            raise BackupException(f"File {path} won't fit on storage disk {self.storage_root}")
+            raise DiskFullException(f"File {path} won't fit on storage disk {self.storage_root}")
         if free_inodes < self.inodes_reserved:
-            raise BackupException(f"Disk {self.storage_root}  has run out of inodes")
+            raise DiskFullException(f"Disk {self.storage_root}  has run out of inodes")
         dest = self.storage_path(path)
         logging.debug("Copying %s to %s", path, dest)
         try:
@@ -392,6 +399,10 @@ class Backup:
             else:
                 sha1 = run_dc3dd(path, dest)
                 # Python doesn't proide 'lutime' function, so no easy way to update symlinks
+                try:
+                    os.chown(dest, lstat.st_uid, lstat.st_gid)
+                except Exception:
+                    pass
                 os.utime(dest, (lstat.st_atime, lstat.st_mtime))
             self.storage_added += lstat.st_size
         except Exception as _e:
@@ -478,7 +489,8 @@ class Backup:
         storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
         if not os.path.exists(storage_db):
             return
-        sqldb = sqlite3.connect(storage_db)
+        sqldb = sqlite3.connect(storage_db,
+                                detect_types=sqlite3.PARSE_DECLTYPES)
         s_cur = sqldb.cursor()
         old_schema = get_schema(s_cur)
         if old_schema != SCHEMA:
@@ -543,7 +555,8 @@ class Backup:
         storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
         logging.debug("Writing updated storage for %s (%s)", self.storage_id, storage_db)
         if not os.path.exists(storage_db):
-            sqldb = sqlite3.connect(storage_db)
+            sqldb = sqlite3.connect(storage_db,
+                                    detect_types=sqlite3.PARSE_DECLTYPES)
             s_cur = sqldb.cursor()
             get_schema(s_cur)         # ensures 'settings' table exists
             upgrade_schema(s_cur, 0)
@@ -574,9 +587,13 @@ class Backup:
             self.cur.execute(
                 f"SELECT { ', '.join(FileObj._fields) } FROM files WHERE sha1 = ?", (sha1,))
         else:
-            self.cur.execute(
-                f"SELECT { ', '.join(FileObj._fields) } FROM files "
-                "WHERE inode = ? AND path LIKE ?", (lstat.st_ino, self.data_mount + '%'))
+            try:
+                self.cur.execute(
+                    f"SELECT { ', '.join(FileObj._fields) } FROM files "
+                    "WHERE inode = ? AND path LIKE ?", (lstat.st_ino, self.data_mount + '%'))
+            except:
+                breakpoint()
+                raise
         matches = [FileObj(*_) for _ in self.cur.fetchall()]
         if is_symlink:
             if any(_.path == path for _ in matches):
@@ -756,7 +773,9 @@ def parse_cmdline():
     parser.add_argument("--no-clean", dest='clean', action='store_false',
                         help="Increate logging level")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
+    logging.basicConfig(
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        level=logging.DEBUG if args.verbose else logging.INFO)
     return args
 
 def backup_path(backup, basepath, exclude, seen):
@@ -784,7 +803,8 @@ def main():
     """Entrypoint"""
     args = parse_cmdline()
     exclude = parse_exclude(args.config)
-    sqldb = sqlite3.connect(args.database)
+    sqldb = sqlite3.connect(args.database,
+                            detect_types=sqlite3.PARSE_DECLTYPES)
     cur = sqldb.cursor()
     try:
         backup = Backup(cur, args.dest, encrypt=args.encrypt)
@@ -799,6 +819,8 @@ def main():
         if args.clean:
             backup.clean_storage(seen)
         backup.write_storage_db()
+    except DiskFullException as _e:
+        logging.error(_e)
     except (BackupException, EncryptionException) as _e:
         logging.error(_e)
         raise
