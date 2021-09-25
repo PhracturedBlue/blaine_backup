@@ -66,9 +66,14 @@ import re
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import uuid
+import signal
+import time
+import multiprocessing
 
 from collections import namedtuple
+from contextlib import contextmanager
 
 # pylint: disable=broad-except
 # pylint: disable=unspecified-encoding
@@ -76,11 +81,138 @@ SCHEMA = 1
 PAR2 = "par2"
 DC3DD = "dc3dd"
 DC3DD_HLOG = f"/tmp/dc3dd.log.{ os.getpid() }"
-
+ENCRYPT_MOUNT = ("securefs mount --keyfile :KEYFILE: "
+                 ":ENCRYPT_DIR: :STORAGE_ROOT:")
+ENCRYPT_UNMOUNT = "fusermount -u :STORAGE_ROOT:"
+ENCRYPT_CREATE = "securefs create --keyfile :KEYFILE: :ENCRYPT_DIR:"
+STORAGE_BACKUP_DB = ".backup_db.sqlite3"
+STORAGE_BACKUP_ID = ".backup_id"
+STORAGE_BACKUP_ENC = ".encrypt"
+STORAGE_BACKUP_DEC = "data"
 FileObj = namedtuple("FileObj", ["path", "inode", "sha1", "time", "size", "storage_id"])
 
 class BackupException(Exception):
     """Base Exception"""
+
+class EncryptionException(Exception):
+    """Encryption Exception"""
+
+### Encryption handler
+class Encrypt:
+    """Manage encryption"""
+
+    def __init__(self, storage_root, encryption_key):
+        self.enc_proc = None
+        self.storage_root = storage_root
+        self.encryption_key = encryption_key
+
+        def signal_handler(_num, _stack):
+            """Trigger an exception if the encryption process fails"""
+            if self.enc_proc:
+                logging.debug("Detected unexpected encryption termination")
+                raise EncryptionException("Encryption process failed")
+
+        signal.signal(signal.SIGURG, signal_handler)
+
+    def __del__(self):
+        """Cleanup"""
+        self.stop()
+
+    def stop(self):
+        """Shutdown encryption process"""
+        if self.enc_proc:
+            encrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_ENC)
+            decrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_DEC)
+            cmd = self.apply_enc_vars(ENCRYPT_UNMOUNT, "None", encrypt_dir, decrypt_dir)
+            logging.debug("Running encryption unmount: %s", " ".join(cmd))
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except Exception:
+                pass
+            try:
+                logging.debug("Sending kill signal to encryption")
+                self.enc_proc.terminate()
+            except Exception:
+                pass
+            try:
+                logging.debug("Waiting for encryption termination")
+                self.enc_proc.join()
+            except Exception:
+                pass
+            logging.debug("Encryption stopped")
+            self.enc_proc = None
+
+    @staticmethod
+    def _start_encryption(pid, command):
+        """Execute encryption in a background process"""
+        try:
+            subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except Exception:
+            os.kill(pid, signal.SIGURG)
+
+    @contextmanager
+    def create_keyfile(self):
+        """Context manager with keyfile created"""
+        with tempfile.TemporaryDirectory() as _td:
+            keyfile = os.path.join(_td, "keyfile")
+            with open(keyfile, "w") as _fh:
+                _fh.write(self.encryption_key)
+            yield keyfile
+
+    @staticmethod
+    def apply_enc_vars(command, keyfile, encrypt_dir, decrypt_dir):
+        """Encryption variable replacement"""
+        return (command.replace(':KEYFILE:', keyfile)
+                .replace(':ENCRYPT_DIR:', encrypt_dir)
+                .replace(':STORAGE_ROOT:', decrypt_dir).split())
+
+    def setup_encryption(self):
+        """Setup encryption (if requested)"""
+        encrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_ENC)
+        decrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_DEC)
+        storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
+        if not os.path.lexists(encrypt_dir):
+            if not self.encryption_key:
+                return self.storage_root
+            if os.path.lexists(storage_db) or glob.glob(os.path.join(self.storage_root,"*")):
+                raise BackupException(f"Volume {self.storage_root} already contains "
+                                      " unencrypted data, but encryption was requested")
+            with self.create_keyfile() as keyfile:
+                create_cmd = self.apply_enc_vars(ENCRYPT_CREATE, keyfile, encrypt_dir, decrypt_dir)
+                logging.debug("Creating encrypted mount: %s", " ".join(create_cmd))
+                try:
+                    subprocess.run(create_cmd, check=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+                except Exception as _e:
+                    raise EncryptionException(
+                        f"Failed to create encrypted mount: {str(_e)}") from _e
+
+        # if os.path.lexists(encrypt_dir)
+        if not self.encryption_key:
+            raise BackupException(f"Volume {self.storage_root} is an encrypted volume, "
+                                  "but no encryption key specified")
+        if os.path.ismount(decrypt_dir):
+            raise BackupException(f"Encrypted volume {decrypt_dir} is already mounted. "
+                                  "Unmount before rerunning")
+        # This isn't secure, but it isn't meant to be
+        with self.create_keyfile() as keyfile:
+            mount_cmd = self.apply_enc_vars(ENCRYPT_MOUNT, keyfile, encrypt_dir, decrypt_dir)
+            logging.debug("Mounting encrypted dir: %s", " ".join(mount_cmd))
+            self.enc_proc = multiprocessing.Process(
+                target=self._start_encryption,
+                args=(os.getpid(), mount_cmd))
+            self.enc_proc.daemon = True
+            self.enc_proc.start()
+            retry = 30
+            while retry and not os.path.ismount(decrypt_dir):
+                time.sleep(0.2)
+                retry -= 1
+            if not retry:
+                self.enc_proc.terminate()
+                raise EncryptionException("Failed to mount encrypted dir {encrypt_dir}")
+            logging.debug("Encrypted mount complete")
+        return decrypt_dir
 
 def get_schema(cur):
     """Fetch current DB schema"""
@@ -91,6 +223,8 @@ def get_schema(cur):
 
 def upgrade_schema(cur, old_schema):
     """Create/upgrade DB schema"""
+    cur.execute("SELECT file FROM pragma_database_list WHERE name='main'")
+    logging.debug("Upgrading schema of %s from %d to %d", cur.fetchone()[0], old_schema, SCHEMA)
     if old_schema == 0:
         cur.execute("CREATE TABLE files "
                     "(path TEXT PRIMARY KEY, inode INT, sha1, time INT, size INT, storage_id)")
@@ -128,7 +262,7 @@ def calc_symlink_hash(path):
 
 def _set_storage_id(storage_root):
     """Read existing storage id, or generate a new one"""
-    id_file = os.path.join(storage_root, ".backup_id")
+    id_file = os.path.join(storage_root, STORAGE_BACKUP_ID)
     if os.path.exists(id_file):
         with open(id_file) as _fh:
             return _fh.readline().strip()
@@ -145,17 +279,19 @@ def get_storage_free(storage_root):
     free_inode = stvfs.f_ffree
     return free, free_inode
 
+
 class Backup:
     """Execute a backup"""
-    # pylint: disable = too-many-instance-attributes
-    def __init__(self, cur, storage_dir, reserved_space=None, parity_pct=None):
+    # pylint: disable = too-many-instance-attributes too-many-arguments
+    def __init__(self, cur, storage_dir, reserved_space=None, parity_pct=None, encrypt=None):
         """Initialize"""
         self.skipped = 0
         self.added = 0
         self.removed = 0
         self.modified = 0
         self.cur = cur
-        self.storage_root = storage_dir
+        self.encrypt = Encrypt(storage_dir, encrypt)
+        self.storage_root = self.encrypt.setup_encryption()
         self.storage_id = _set_storage_id(storage_dir)
         self.storage_added = 0
         self.storage_reserved = 10_000_000_000 if reserved_space is None else reserved_space
@@ -187,6 +323,7 @@ class Backup:
         """Rename path on storage disks (and update par2 files)"""
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
+        logging.debug("Renaming %s to %s", origpath, newpath)
         try:
             os.rename(origpath, newpath)
             if os.path.exists(origpath + ".par2"):
@@ -204,6 +341,7 @@ class Backup:
             raise BackupException(f"Disk {self.storage_root}  has run out of inodes")
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
+        logging.debug("Hardlinking %s to %s", origpath, newpath)
         try:
             os.makedirs(os.path.dirname(newpath), exist_ok=True)
             os.link(origpath, newpath)
@@ -225,6 +363,7 @@ class Backup:
         path = self.storage_path(path)
         if not os.path.lexists(path):
             return
+        logging.debug("Deleting %s", path)
         if not lstat:
             lstat = os.lstat(path)
         try:
@@ -243,8 +382,9 @@ class Backup:
         if free_inodes < self.inodes_reserved:
             raise BackupException(f"Disk {self.storage_root}  has run out of inodes")
         dest = self.storage_path(path)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        logging.debug("Copying %s to %s", path, dest)
         try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
             if os.path.islink(path):
                 link = os.readlink(path)
                 os.symlink(link, dest)
@@ -276,6 +416,7 @@ class Backup:
     def calculate_par2(self, path):
         """Run PAR2 on path to generate extra parity"""
         path = self.storage_path(path)
+        logging.debug("Creating PAR2 files for %s", path)
         try:
             self.rm_par2(path)
             subprocess.run([PAR2, 'c', path],
@@ -320,6 +461,8 @@ class Backup:
 
     def append_action(self, action, storage_id, path1, path2=None):
         """Add a new action for a non-present archive disk to the action table"""
+        logging.debug("Applying deferred action to %s: %s %s%s",
+                      storage_id, action, path1, (f" to {path2}" if path2 else ""))
         if action not in ('RENAME', 'LINK', 'DELETE'):
             logging.error("Unknown action: (%s, %s, %s)", action, path1, path2)
             raise Exception(f"unsupported action: { action }")
@@ -332,7 +475,7 @@ class Backup:
 
     def sync_storage_db(self):
         """Apply any actions to storage_db, and sync files between dbs"""
-        storage_db = os.path.join(self.storage_root, ".backup_db.sqlite3")
+        storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
         if not os.path.exists(storage_db):
             return
         sqldb = sqlite3.connect(storage_db)
@@ -340,7 +483,7 @@ class Backup:
         old_schema = get_schema(s_cur)
         if old_schema != SCHEMA:
             upgrade_schema(s_cur, old_schema)
-
+        logging.debug("Syncing storage for %s (%s)", self.storage_id, storage_db)
         for action, path, target in self.cur.execute(
                 "SELECT action, path, target_path FROM actions "
                 "WHERE storage_id = ?", (self.storage_id,)):
@@ -397,7 +540,8 @@ class Backup:
 
     def write_storage_db(self):
         """Write the relevant files data for the current storage disk to the storage-local db"""
-        storage_db = os.path.join(self.storage_root, ".backup_db.sqlite3")
+        storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
+        logging.debug("Writing updated storage for %s (%s)", self.storage_id, storage_db)
         if not os.path.exists(storage_db):
             sqldb = sqlite3.connect(storage_db)
             s_cur = sqldb.cursor()
@@ -569,6 +713,7 @@ class Backup:
         """Delete any files on current storage that are no longer present"""
         remove = set()
         actions = []
+        logging.debug("Deleting unseen items from database")
         # Do not run any sql queries while iterating!
         for obj in self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files"):
             item = FileObj(*obj)
@@ -595,6 +740,7 @@ def parse_exclude(exclusion_file):
             for line in _fh.readlines():
                 if line.startswith("exclude"):
                     res = fnmatch.translate(line.strip().split(None, 1)[-1])
+                    logging.debug("Adding exclusion for: %s", res)
                     exclude.append(re.compile(res))
     return exclude
 
@@ -606,6 +752,7 @@ def parse_cmdline():
     parser.add_argument("--database", "--db", required=True, help="Snapraid config file")
     parser.add_argument("--dest", required=True, help="Directory to write files to")
     parser.add_argument("--verbose", action='store_true', help="Increate logging level")
+    parser.add_argument("--encrypt", metavar='KEY', help="Enable encryption, using specificed key")
     parser.add_argument("--no-clean", dest='clean', action='store_false',
                         help="Increate logging level")
     args = parser.parse_args()
@@ -639,24 +786,26 @@ def main():
     exclude = parse_exclude(args.config)
     sqldb = sqlite3.connect(args.database)
     cur = sqldb.cursor()
-    backup = Backup(cur, args.dest)
     try:
+        backup = Backup(cur, args.dest, encrypt=args.encrypt)
         schema = get_schema(cur)
         if schema != SCHEMA:
             upgrade_schema(cur, schema)
         backup.sync_storage_db()
         seen = set()
         for basepath in args.paths:
+            basepath = os.path.abspath(basepath)
             backup_path(backup, basepath, exclude, seen)
         if args.clean:
             backup.clean_storage(seen)
         backup.write_storage_db()
-    except BackupException as _e:
+    except (BackupException, EncryptionException) as _e:
         logging.error(_e)
         raise
     finally:
         sqldb.commit()
         sqldb.close()
+        backup.encrypt.stop()
     backup.show_summary()
 
 if __name__ == "__main__":  # pragma: no cover

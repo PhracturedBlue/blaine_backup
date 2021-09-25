@@ -3,7 +3,7 @@ FROM python:slim-bullseye
 ARG UID=1000
 ARG GID=1000
 RUN apt-get update -y && \
-    apt-get install -y dc3dd par2 sqlite3 && \
+    apt-get install -y dc3dd par2 sqlite3 fuse securefs && \
     apt-get clean -y && \
     rm -rf /var/lib/apt/lists/* /tmp/* /src
 

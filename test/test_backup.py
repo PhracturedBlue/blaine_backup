@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import uuid
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
@@ -17,6 +18,9 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
 EXCLUDE_FILE = os.path.join(DATA_DIR, "snapraid.conf")
 STORAGE_DIRS = [
   {'ID': None, 'PATH': None},   # Used for common storage
+  {'ID': "archive1-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
+  {'ID': "archive2-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
+  # These are encrypted copies of the above
   {'ID': "archive1-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
   {'ID': "archive2-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
 ]
@@ -35,10 +39,19 @@ def setup_archive():
     for obj in STORAGE_DIRS:
         del obj['TDOBJ']
 
-def prepare_stage(stage_num):
+def prepare_stage(stage_num, clean=False):
     """Ensure hardlinks are created since git can't store them"""
     orig_dir = os.path.join(DATA_DIR, f'stage{ stage_num }')
     dest_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
+    if clean:
+        INODE_MAP.clear()
+        INODE_MAP['last'] = 1000
+        if os.path.exists(dest_dir):
+            shutil.rmtree(dest_dir)
+        try:
+            os.unlink(os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3"))
+        except:
+            pass
     if not os.path.exists(dest_dir):
         shutil.copytree(orig_dir, dest_dir, symlinks=True, ignore_dangling_symlinks=True)
     else:
@@ -76,6 +89,17 @@ def prepare_stage(stage_num):
             path = os.path.join(root, fname)
             os.unlink(path)
             os.link(orig_path, new_path)
+
+@contextmanager
+def do_encrypt(encryption_key, storage_dir):
+    if not encryption_key:
+        yield storage_dir
+        return
+    enc = backup.Encrypt(storage_dir, encryption_key)
+    try:
+        yield enc.setup_encryption()
+    finally:
+        enc.stop()
 
 def verify_db(db_file, expected_file, storage_id=None):
     def dict_factory(cursor, row):
@@ -121,7 +145,7 @@ def verify_db(db_file, expected_file, storage_id=None):
     assert files == expected['files']
     assert actions == expected['actions']
 
-def verify_archive(archive_dir, expected_file, storage_id):
+def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
     with open(expected_file) as _fh:
         expected = json.load(_fh)
     orig_data_dir = expected['orig_data_dir']
@@ -151,10 +175,12 @@ def verify_archive(archive_dir, expected_file, storage_id):
                 with open(arc_path, "rb") as _fh:
                     sha1 = hashlib.sha1(_fh.read()).hexdigest()
             assert val['sha1'] == sha1
-            if sha1 in shamap:
-                assert os.lstat(arc_path).st_ino == shamap[sha1]
-            else:
-                shamap[sha1] = os.lstat(arc_path).st_ino
+            if not encrypt:
+                # encryption masks hardlinks
+                if sha1 in shamap:
+                    assert os.lstat(arc_path).st_ino == shamap[sha1]
+                else:
+                    shamap[sha1] = os.lstat(arc_path).st_ino
     for obj in fileobjs:
         if obj['path'] not in seen:
             breakpoint()
@@ -208,23 +234,25 @@ def dump_dir_stats(dirname):
 #    dump_dir_stats(STORAGE_DIRS[0]['PATH'])
 #    assert True
 
-def run_stage(monkeypatch, caplog, stage, archive):
-    prepare_stage(stage)
+def run_stage(monkeypatch, caplog, stage, archive, encrypt=None):
+    prepare_stage(stage, clean=(stage==1))
     archive_dir = STORAGE_DIRS[archive]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
     expected_file = os.path.join(DATA_DIR, f"stage{ stage }_db.json")
     monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
                                      "--dest", archive_dir,
-                                     "--conf", EXCLUDE_FILE, 
-                                     data_dir])
+                                     "--conf", EXCLUDE_FILE,
+                                     data_dir] + 
+                                     (["--enc", encrypt] if encrypt else []))
     backup.main()
     warn_or_above = [_ for _ in caplog.record_tuples if _[1] > logging.INFO]
     assert not warn_or_above
     verify_db(db_file, expected_file)
     verify_data(data_dir, db_file, EXCLUDE_FILE)
-    verify_archive(archive_dir, expected_file, STORAGE_DIRS[archive]['ID'])
-    verify_db(os.path.join(archive_dir, ".backup_db.sqlite3"),
+    with do_encrypt(encrypt, archive_dir) as storage_dir:
+        verify_archive(storage_dir, expected_file, STORAGE_DIRS[archive]['ID'], encrypt)
+        verify_db(os.path.join(storage_dir, ".backup_db.sqlite3"),
               expected_file, STORAGE_DIRS[archive]['ID'])
 
 def test_stage1_archive(monkeypatch, caplog):
@@ -235,6 +263,15 @@ def test_stage2_archive(monkeypatch, caplog):
 
 def test_stage3_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 3, 1)
+
+def test_stage1_encrypted(monkeypatch, caplog):
+    run_stage(monkeypatch, caplog, 1, 3, encrypt="abcd1234")
+
+def test_stage2_encrypted(monkeypatch, caplog):
+    run_stage(monkeypatch, caplog, 2, 4, encrypt="abcd1234")
+
+def test_stage3_encrypted(monkeypatch, caplog):
+    run_stage(monkeypatch, caplog, 3, 3, encrypt="abcd1234")
 
 def test_write_storage_id():
     with tempfile.TemporaryDirectory() as _td:
