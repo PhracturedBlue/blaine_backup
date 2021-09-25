@@ -41,15 +41,18 @@ can be periodically swapped.  For example:
   7. After a disk swap, Blaine will copy all changes between DiskC and DiskC' to DiskC
      (now DiskC and DiskC' are identical) and the process 
   8. Steps 5-7 repeat until DiskC/DiskC' are full
-  9. A new 8TB disk is procured as DiskD, DiskC' is wiwped and re-initialized as DiskD', and DiskC
-     remoains in offsite storage.
+  9. A new 8TB disk is procured as DiskD, DiskC' is wiped and re-initialized as DiskD', and DiskC
+     remains in offsite storage.
   10. Repeat from step 5
 
 With the above process, at any given time, the maximum amount of data lost is the 1-week difference between DiskC and DiskC'
 
-## Encryption (In progress)
-Blaine Backup can use encryption to secure offline disks.  This intended to prevent snooping on offline disks that are
-stored in un-trusted locations.  It is NOT intended to provide any security when mounted in the host system or during
+## Encryption
+Blaine Backup can use encryption to secure offline disks.  SecureFS is the only tested encryption system, though any system
+that has mount/unmount commands and can take a password on the command-line or via keyfile should be usable).
+
+Using encryption is intended to prevent unauthorized snooping of offline disks that are stored in un-trusted locations.
+It is NOT intended to provide any security when mounted in the host system or during
 the backup process.  When using encryption, the encryption key should be redundantly stored (separately from the
 archive disks.  **If the encryption key is lost, the backups cannot be restored**.
 If SecureFS is used for encryption and the underlying filesystem is NTFS (as of Linux 5.15, the Paragon NTFS driver should
@@ -76,10 +79,11 @@ provide similar performance to other native filesystems), then data can (theoret
    onto the host system
 
 ## Requirements
+  * linux OS: The code should be portable to MacOS/Windows, but no work has been done on this yet
   * python >= 3.6
   * dc3dd : Fast copy & checksum in a single step
   * par2 (optional): Calculate parity to avoid bitrot
-  * securefs /encfs (optional): Provide encryption
+  * securefs(optional): Provide encryption
 
 ## Other considertations
 
