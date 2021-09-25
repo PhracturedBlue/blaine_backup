@@ -47,6 +47,14 @@ can be periodically swapped.  For example:
 
 With the above process, at any given time, the maximum amount of data lost is the 1-week difference between DiskC and DiskC'
 
+## Encryption (In progress)
+Blaine Backup can use encryption to secure offline disks.  This intended to prevent snooping on offline disks that are
+stored in un-trusted locations.  It is NOT intended to provide any security when mounted in the host system or during
+the backup process.  When using encryption, the encryption key should be redundantly stored (separately from the
+archive disks.  **If the encryption key is lost, the backups cannot be restored**.
+If SecureFS is used for encryption and the underlying filesystem is NTFS (as of Linux 5.15, the Paragon NTFS driver should
+provide similar performance to other native filesystems), then data can (theoretically) be restored onto a Windows system.
+
 ## Archive process
  * Apply any deferred actions that are needed to the current archive disk
  * Iterate over each file in the path to archive
@@ -70,7 +78,8 @@ With the above process, at any given time, the maximum amount of data lost is th
 ## Requirements
   * python >= 3.6
   * dc3dd : Fast copy & checksum in a single step
-  * par2 : Calculate parity to avoid bitrot
+  * par2 (optional): Calculate parity to avoid bitrot
+  * securefs /encfs (optional): Provide encryption
 
 ## Other considertations
 
