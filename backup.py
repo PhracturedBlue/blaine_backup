@@ -57,6 +57,7 @@
 # FUTURE:
 #  * cleanup actions on current storage
 import argparse
+import configparser
 import fnmatch
 import glob
 import hashlib
@@ -64,6 +65,7 @@ import logging
 import os
 import re
 import sqlite3
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -74,21 +76,29 @@ import multiprocessing
 
 from collections import namedtuple
 from contextlib import contextmanager
+from datetime import datetime
 
 # pylint: disable=broad-except
 # pylint: disable=unspecified-encoding
 SCHEMA = 1
-PAR2 = "par2"
-DC3DD = "dc3dd"
-DC3DD_HLOG = f"/tmp/dc3dd.log.{ os.getpid() }"
-ENCRYPT_MOUNT = ("securefs mount --keyfile :KEYFILE: "
-                 ":ENCRYPT_DIR: :STORAGE_ROOT:")
-ENCRYPT_UNMOUNT = "fusermount -u :STORAGE_ROOT:"
-ENCRYPT_CREATE = "securefs create --keyfile :KEYFILE: :ENCRYPT_DIR:"
-STORAGE_BACKUP_DB = ".backup_db.sqlite3"
-STORAGE_BACKUP_ID = ".backup_id"
-STORAGE_BACKUP_ENC = ".encrypt"
-STORAGE_BACKUP_DEC = "data"
+
+class Config:
+    # PAR2_CREATE = "par2 c -r:PERCENT: -t:THREADS: :FILENAME:"
+    PAR2_CREATE = ("parpar -s :BLOCKSIZE:b -r :PERCENT:% --slice-dist=pow2 -t:THREADS: "
+                   "-o :FILENAME:.par2 :FILENAME:")
+    DC3DD = "dc3dd"
+    DC3DD_HLOG = f"/tmp/dc3dd.log.{ os.getpid() }"
+    # ENCRYPT_CREATE = "securefs create --keyfile :KEYFILE: :ENCRYPT_DIR:"
+    # ENCRYPT_MOUNT = ("securefs mount --keyfile :KEYFILE: "
+    #                  ":ENCRYPT_DIR: :STORAGE_ROOT:")
+    ENCRYPT_CREATE = "gocryptfs -init --passfile :KEYFILE: :ENCRYPT_DIR:"
+    ENCRYPT_MOUNT = ("gocryptfs -fg --passfile :KEYFILE: :ENCRYPT_DIR: :STORAGE_ROOT:")
+    ENCRYPT_UNMOUNT = "fusermount -u :STORAGE_ROOT:"
+    STORAGE_BACKUP_DB = ".backup_db.sqlite3"
+    STORAGE_BACKUP_ID = ".backup_id"
+    STORAGE_BACKUP_ENC = ".encrypt"
+    STORAGE_BACKUP_DEC = "data"
+
 FileObj = namedtuple("FileObj", ["path", "inode", "sha1", "time", "size", "storage_id"])
 
 # Convert unsigned 64bit inodes to signed for sqlite3
@@ -128,9 +138,9 @@ class Encrypt:
     def stop(self):
         """Shutdown encryption process"""
         if self.enc_proc:
-            encrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_ENC)
-            decrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_DEC)
-            cmd = self.apply_enc_vars(ENCRYPT_UNMOUNT, "None", encrypt_dir, decrypt_dir)
+            encrypt_dir = os.path.join(self.storage_root, Config.STORAGE_BACKUP_ENC)
+            decrypt_dir = os.path.join(self.storage_root, Config.STORAGE_BACKUP_DEC)
+            cmd = self.apply_enc_vars(Config.ENCRYPT_UNMOUNT, "None", encrypt_dir, decrypt_dir)
             logging.debug("Running encryption unmount: %s", " ".join(cmd))
             try:
                 subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -176,9 +186,9 @@ class Encrypt:
 
     def setup_encryption(self):
         """Setup encryption (if requested)"""
-        encrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_ENC)
-        decrypt_dir = os.path.join(self.storage_root, STORAGE_BACKUP_DEC)
-        storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
+        encrypt_dir = os.path.join(self.storage_root, Config.STORAGE_BACKUP_ENC)
+        decrypt_dir = os.path.join(self.storage_root, Config.STORAGE_BACKUP_DEC)
+        storage_db = os.path.join(self.storage_root, Config.STORAGE_BACKUP_DB)
         if not os.path.lexists(encrypt_dir):
             if not self.encryption_key:
                 return self.storage_root
@@ -186,11 +196,14 @@ class Encrypt:
                 raise BackupException(f"Volume {self.storage_root} already contains "
                                       " unencrypted data, but encryption was requested")
             with self.create_keyfile() as keyfile:
-                create_cmd = self.apply_enc_vars(ENCRYPT_CREATE, keyfile, encrypt_dir, decrypt_dir)
+                create_cmd = self.apply_enc_vars(Config.ENCRYPT_CREATE,
+                                                 keyfile, encrypt_dir, decrypt_dir)
                 logging.debug("Creating encrypted mount: %s", " ".join(create_cmd))
                 try:
+                    os.mkdir(encrypt_dir)
                     subprocess.run(create_cmd, check=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
+                    os.mkdir(decrypt_dir)
                 except Exception as _e:
                     raise EncryptionException(
                         f"Failed to create encrypted mount: {str(_e)}") from _e
@@ -204,7 +217,7 @@ class Encrypt:
                                   "Unmount before rerunning")
         # This isn't secure, but it isn't meant to be
         with self.create_keyfile() as keyfile:
-            mount_cmd = self.apply_enc_vars(ENCRYPT_MOUNT, keyfile, encrypt_dir, decrypt_dir)
+            mount_cmd = self.apply_enc_vars(Config.ENCRYPT_MOUNT, keyfile, encrypt_dir, decrypt_dir)
             logging.debug("Mounting encrypted dir: %s", " ".join(mount_cmd))
             self.enc_proc = multiprocessing.Process(
                 target=self._start_encryption,
@@ -220,6 +233,122 @@ class Encrypt:
                 raise EncryptionException("Failed to mount encrypted dir {encrypt_dir}")
             logging.debug("Encrypted mount complete")
         return decrypt_dir
+
+class Par2Queue:
+    """Run Par2 threads"""
+
+    def __init__(self, threads, threshold):
+        """Initialize"""
+        self.fast_count = threads
+        self.slow_threads = threads
+        self.threshold = threshold
+        self.desired_block_count = 2000  # From par2cmdline
+        self.percent = 10
+        self.jobs = {}
+        self.jobs_by_fname = {}
+        self.fast_jobs = set()
+        self.slow_job = None
+
+    def _wait_finish(self, pid, waitcode):
+        size = 0
+        if pid not in self.jobs:
+            return 0
+        retcode = os.waitstatus_to_exitcode(waitcode)
+        if retcode:
+            raise BackupException(f"Failed PAR2 Run: {self.jobs[pid][0]}")
+        if pid == self.slow_job:
+            self.slow_job = None
+        elif pid in self.fast_jobs:
+            self.fast_jobs.remove(pid)
+        else:
+            breakpoint()
+            raise BackupException(f"Got invalid PAR2 pid '{pid}")
+        logging.debug("Completed PAR2 Job: %s", self.jobs[pid][0])
+        path = self.jobs[pid][1]
+        if os.path.exists(path + ".par2"):
+            lstat_p = os.lstat(path + ".par2")
+            size += lstat_p.st_size
+            for par2path in glob.glob(f"{ path }.vol*.par2"):
+                lstat_p = os.lstat(par2path)
+                size += lstat_p.st_size
+        del self.jobs[pid]
+        del self.jobs_by_fname[path]
+        return size
+
+    def _wait(self, fast):
+        """Wait if too many jobs are running"""
+        size = 0
+        while (fast and len(self.fast_jobs) >= self.fast_count) or self.slow_job:
+            pid, waitcode = os.wait()
+            size += self._wait_finish(pid, waitcode)
+        return size
+
+    def _run(self, cmd, fname):
+        """Run Par2 in its own thread"""
+        pid = os.fork()
+        if pid:
+            # Original process
+            self.jobs[pid] = (" ".join(cmd), fname)
+            return pid
+        # New process
+        os.closerange(0, 10)
+        os.open(os.devnull, os.O_RDWR) # standard input (0)
+        os.open(os.devnull, os.O_WRONLY|os.O_TRUNC|os.O_CREAT) # standard output (1)
+        os.open(os.devnull, os.O_WRONLY|os.O_TRUNC|os.O_CREAT) # standard error (2)
+
+        os.execlp(cmd[0], *cmd)
+        os._exit(1)  # pylint: disable=protected-access
+        return None
+
+    def _calc_blocks(self, size):
+        return (((size // self.desired_block_count) + 3) & (~3)) or 4
+
+    def create(self, fname):
+        """Run par2 create"""
+        try:
+            lstat = os.lstat(fname)
+            size = lstat.st_size
+        except Exception:
+            return 0
+        block_size = self._calc_blocks(size)
+        threads = self.slow_threads if size > self.threshold else 1
+        cmdline = [_
+                   .replace(':FILENAME:', fname) \
+                   .replace(':PERCENT:', str(self.percent)) \
+                   .replace(':BLOCKSIZE:', str(block_size))
+                   .replace(':THREADS:', str(threads))
+                   for _ in Config.PAR2_CREATE.split()]
+        if size > self.threshold:
+            completed_bytes = self._wait(fast=False)
+            pid = self._run(cmdline, fname)
+            self.jobs_by_fname[fname] = pid
+            self.slow_job = pid
+        else:
+            completed_bytes = self._wait(fast=True)
+            pid = self._run(cmdline, fname)
+            self.jobs_by_fname[fname] = pid
+            self.fast_jobs.add(pid)
+        return completed_bytes
+
+    def wait_file(self, fname):
+        """Wait for a specific job to complete"""
+        if fname in self.jobs_by_fname:
+            pid, waitcode = os.waitpid(self.jobs_by_fname[fname], 0)
+            return self._wait_finish(pid, waitcode)
+        return 0
+
+    def join(self):
+        """Wait for all par2 jobs to complete"""
+        size = 0
+        self.fast_count = 1
+        while self.jobs:
+            try:
+                size += self._wait(fast=True)
+            except BackupException as _e:
+                breakpoint()
+                logging.error(_e)
+                break
+        return size
 
 def get_schema(cur):
     """Fetch current DB schema"""
@@ -244,13 +373,13 @@ def upgrade_schema(cur, old_schema):
 def run_dc3dd(src, dest):
     """Use dc3dd to do a copy + calc SHA1"""
     try:
-        os.unlink(DC3DD_HLOG)
+        os.unlink(Config.DC3DD_HLOG)
     except FileNotFoundError:
         pass
-    subprocess.run([DC3DD, f"if={ src }", f"of={ dest }", "hash=sha1", "nwspc=on",
-                    f"hlog={ DC3DD_HLOG }"],
+    subprocess.run([Config.DC3DD, f"if={ src }", f"of={ dest }", "hash=sha1", "nwspc=on",
+                    f"hlog={ Config.DC3DD_HLOG }"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    with open(DC3DD_HLOG) as _fh:
+    with open(Config.DC3DD_HLOG) as _fh:
         for line in _fh:
             line = line.strip()
             if line.endswith(' (sha1)'):
@@ -269,7 +398,7 @@ def calc_symlink_hash(path):
 
 def _set_storage_id(storage_root):
     """Read existing storage id, or generate a new one"""
-    id_file = os.path.join(storage_root, STORAGE_BACKUP_ID)
+    id_file = os.path.join(storage_root, Config.STORAGE_BACKUP_ID)
     if os.path.exists(id_file):
         with open(id_file) as _fh:
             return _fh.readline().strip()
@@ -290,7 +419,8 @@ def get_storage_free(storage_root):
 class Backup:
     """Execute a backup"""
     # pylint: disable = too-many-instance-attributes too-many-arguments
-    def __init__(self, cur, storage_dir, reserved_space=None, parity_pct=None, encrypt=None):
+    def __init__(self, cur, storage_dir, reserved_space=None, parity_pct=None, encrypt=None,
+                 par2_threads=None, par2_threshold=10_000_000):
         """Initialize"""
         self.skipped = 0
         self.added = 0
@@ -298,6 +428,7 @@ class Backup:
         self.modified = 0
         self.cur = cur
         self.encrypt = Encrypt(storage_dir, encrypt)
+        self.par2q = Par2Queue(par2_threads, par2_threshold)
         self.storage_root = self.encrypt.setup_encryption()
         self.storage_id = _set_storage_id(storage_dir)
         self.storage_added = 0
@@ -348,6 +479,7 @@ class Backup:
             raise DiskFullException(f"Disk {self.storage_root}  has run out of inodes")
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
+        self.storage_added += self.par2q.wait_file(origpath)
         logging.debug("Hardlinking %s to %s", origpath, newpath)
         try:
             os.makedirs(os.path.dirname(newpath), exist_ok=True)
@@ -400,7 +532,8 @@ class Backup:
                 sha1 = run_dc3dd(path, dest)
                 # Python doesn't proide 'lutime' function, so no easy way to update symlinks
                 try:
-                    os.chown(dest, lstat.st_uid, lstat.st_gid)
+                    os.chown(dest, lstat.st_uid, lstat.st_gid,
+                             follow_symlinks=False)
                 except Exception:
                     pass
                 os.utime(dest, (lstat.st_atime, lstat.st_mtime))
@@ -430,14 +563,7 @@ class Backup:
         logging.debug("Creating PAR2 files for %s", path)
         try:
             self.rm_par2(path)
-            subprocess.run([PAR2, 'c', path],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            if os.path.exists(path + ".par2"):
-                lstat_p = os.lstat(path + ".par2")
-                self.storage_added += lstat_p.st_size
-                for par2path in glob.glob(f"{ path }.vol*.par2"):
-                    lstat_p = os.lstat(par2path)
-                    self.storage_added += lstat_p.st_size
+            self.storage_added += self.par2q.create(path)
         except Exception as _e:
             raise BackupException(f"Failed to create par2 files for {path}: {str(_e)}") from _e
 
@@ -486,7 +612,7 @@ class Backup:
 
     def sync_storage_db(self):
         """Apply any actions to storage_db, and sync files between dbs"""
-        storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
+        storage_db = os.path.join(self.storage_root, Config.STORAGE_BACKUP_DB)
         if not os.path.exists(storage_db):
             return
         sqldb = sqlite3.connect(storage_db,
@@ -552,7 +678,7 @@ class Backup:
 
     def write_storage_db(self):
         """Write the relevant files data for the current storage disk to the storage-local db"""
-        storage_db = os.path.join(self.storage_root, STORAGE_BACKUP_DB)
+        storage_db = os.path.join(self.storage_root, Config.STORAGE_BACKUP_DB)
         logging.debug("Writing updated storage for %s (%s)", self.storage_id, storage_db)
         if not os.path.exists(storage_db):
             sqldb = sqlite3.connect(storage_db,
@@ -562,6 +688,8 @@ class Backup:
             upgrade_schema(s_cur, 0)
             sqldb.commit()
             sqldb.close()
+        else:
+            backup_db(storage_db)
         # If we get here, the db schema is synced (either done here, or in sync_storage_db())
         self.cur.execute("ATTACH ? AS storage_db", (storage_db,))
         self.cur.execute("DELETE FROM storage_db.files")
@@ -726,7 +854,7 @@ class Backup:
         self.added += 1
         return needs_par2
 
-    def clean_storage(self, seen):
+    def clean_storage(self, seen, paths):
         """Delete any files on current storage that are no longer present"""
         remove = set()
         actions = []
@@ -734,7 +862,8 @@ class Backup:
         # Do not run any sql queries while iterating!
         for obj in self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files"):
             item = FileObj(*obj)
-            if item.path in seen:
+            #FIXME
+            if item.path in seen: # or ... not any(_ in item.pah for _ in paths):
                 continue
             self.removed += 1
             if item.storage_id == self.storage_id:
@@ -749,6 +878,20 @@ class Backup:
         for action in actions:
             self.append_action(*action)
 
+def backup_db(db_file):
+    """Create a backup of db_file"""
+    if not os.path.exists(db_file):
+        return
+    basedir, fname = os.path.split(db_file)
+    backup_dir = os.path.join(basedir, ".backup_db.old")
+    mtime = os.stat(db_file).st_mtime
+    outfile = os.path.join(backup_dir, f"{fname}.{datetime.fromtimestamp(mtime).isoformat()}")
+    if os.path.exists(outfile):
+        return
+    if not os.path.exists(backup_dir):
+        os.mkdir(backup_dir)
+    shutil.copyfile(db_file, outfile)
+
 def parse_exclude(exclusion_file):
     """Generate exclusion list in RE format"""
     exclude = []
@@ -761,18 +904,60 @@ def parse_exclude(exclusion_file):
                     exclude.append(re.compile(res))
     return exclude
 
+def parse_config(configfile, parser):
+    """Parse config file"""
+    args = [_.dest for _ in parser._actions]
+    config = configparser.ConfigParser()
+    config.read(configfile)
+    defaults = {}
+    for key in config['DEFAULT']:
+        try:
+            if getattr(Config, key.upper()):
+                setattr(Config, key.upper(), config['DEFAULT'][key])
+        except AttributeError:
+            if key in args:
+               defaults[key] = config['DEFAULT'][key]
+            else:
+                logging.warning("Ignoring invalid config key: %s", key)
+    if defaults:
+        parser.set_defaults(**defaults)
+
 def parse_cmdline():
     """Parse cmdline args"""
-    parser = argparse.ArgumentParser()
+    # From https://stackoverflow.com/questions/3609852/
+    #      which-is-the-best-way-to-allow-configuration-options-be-overridden-at-the-comman
+    conf_parser = argparse.ArgumentParser(
+        description=__doc__, # printed with -h/--help
+        # Don't mess with format of description
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        # Turn off help, so we print all options in response to -h
+        add_help=False
+        )
+    conf_parser.add_argument("-c", "--config_file",
+                        help="Specify config file", metavar="FILE")
+    parser = argparse.ArgumentParser(
+        # Inherit options from config_parser
+        parents=[conf_parser]
+        )
     parser.add_argument('paths', metavar='PATH', nargs='+', help='Paths to archive')
-    parser.add_argument("--config", help="Snapraid config file")
+    parser.add_argument("--config", help="Config file")
+    parser.add_argument("--snapraid", help="Snapraid config file")
     parser.add_argument("--database", "--db", required=True, help="Snapraid config file")
-    parser.add_argument("--dest", required=True, help="Directory to write files to")
+    parser.add_argument("--dest_dir", required=True, help="Directory to write files to")
     parser.add_argument("--verbose", action='store_true', help="Increate logging level")
     parser.add_argument("--encrypt", metavar='KEY', help="Enable encryption, using specificed key")
+    parser.add_argument("--par2_threads", "--threads", default=multiprocessing.cpu_count(),
+                        type=int,  help="Enable encryption, using specificed key")
+    parser.add_argument("--par2_threshold", default=10_000_000, type=int,
+                        help="Files larger than this use a single multi-threaded par2 call instead"
+                             " of using multiple single-threaded par2 calls")
     parser.add_argument("--no-clean", dest='clean', action='store_false',
                         help="Increate logging level")
-    args = parser.parse_args()
+
+    args, remaining_argv = conf_parser.parse_known_args()
+    if args.config_file:
+        parse_config(args.config_file, parser)
+    args = parser.parse_args(remaining_argv)
     logging.basicConfig(
         format='%(asctime)s %(levelname)-8s %(message)s',
         level=logging.DEBUG if args.verbose else logging.INFO)
@@ -783,14 +968,14 @@ def backup_path(backup, basepath, exclude, seen):
     backup.set_data_mount(basepath)
     for root, dirs, files in os.walk(basepath):
         filtered_dirs = []
-        for dirname in dirs:
+        for dirname in sorted(dirs):
             path = os.path.join(root, dirname)
             if any(_exc.search(path) for _exc in exclude):
                 logging.debug("Excluding %s", path)
                 continue
             filtered_dirs.append(path)
-        dirs = filtered_dirs
-        for fname in files:
+        dirs[:] = filtered_dirs
+        for fname in sorted(files):
             path = os.path.join(root, fname)
             if any(_exc.search(path) for _exc in exclude):
                 logging.debug("Excluding %s", path)
@@ -802,12 +987,15 @@ def backup_path(backup, basepath, exclude, seen):
 def main():
     """Entrypoint"""
     args = parse_cmdline()
-    exclude = parse_exclude(args.config)
+    exclude = parse_exclude(args.snapraid)
+    backup_db(args.database)
     sqldb = sqlite3.connect(args.database,
                             detect_types=sqlite3.PARSE_DECLTYPES)
     cur = sqldb.cursor()
+    backup = None
     try:
-        backup = Backup(cur, args.dest, encrypt=args.encrypt)
+        backup = Backup(cur, args.dest_dir, encrypt=args.encrypt, par2_threads=args.par2_threads,
+                        par2_threshold=args.par2_threshold)
         schema = get_schema(cur)
         if schema != SCHEMA:
             upgrade_schema(cur, schema)
@@ -817,7 +1005,9 @@ def main():
             basepath = os.path.abspath(basepath)
             backup_path(backup, basepath, exclude, seen)
         if args.clean:
-            backup.clean_storage(seen)
+            backup.clean_storage(seen, args.paths)
+        backup.write_storage_db()
+    except KeyboardInterrupt:
         backup.write_storage_db()
     except DiskFullException as _e:
         logging.error(_e)
@@ -827,8 +1017,11 @@ def main():
     finally:
         sqldb.commit()
         sqldb.close()
-        backup.encrypt.stop()
-    backup.show_summary()
+        if backup:
+            backup.storage_added += backup.par2q.join()
+            backup.encrypt.stop()
+    if backup:
+        backup.show_summary()
 
 if __name__ == "__main__":  # pragma: no cover
     main()

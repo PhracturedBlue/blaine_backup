@@ -20,7 +20,10 @@ STORAGE_DIRS = [
   {'ID': None, 'PATH': None},   # Used for common storage
   {'ID': "archive1-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
   {'ID': "archive2-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
-  # These are encrypted copies of the above
+  # These are gocryptfs/parpar copies of the above
+  {'ID': "archive1-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
+  {'ID': "archive2-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
+  # These are securefs/par2 copies of the above
   {'ID': "archive1-e35d-45ee-a085-d9eddf7152ca", 'PATH': None},
   {'ID': "archive2-3dcc-49e9-a70e-8f6499426986", 'PATH': None},
 ]
@@ -153,6 +156,7 @@ def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
     seen = set()
     shamap = {}
     for root, dirs, files in os.walk(archive_dir):
+        dirs[:] = [_ for _ in dirs if _ != '.backup_db.old']
         for fname in files:
             if root == archive_dir and fname in (".backup_id", ".backup_db.sqlite3"):
                 continue
@@ -197,6 +201,12 @@ def verify_data(data_dir, db_file, exclude_file):
     seen = set()
     for root, dirs, files in os.walk(data_dir):
         filtered_dirs = []
+        for dirname in sorted(dirs):
+            path = os.path.join(root, dirname)
+            if any(_exc.search(path) for _exc in exclude):
+                continue
+            filtered_dirs.append(path)
+        dirs[:] = filtered_dirs
         for fname in files:
             path = os.path.join(root, fname)
             if any(_exc.search(path) for _exc in exclude):
@@ -234,17 +244,22 @@ def dump_dir_stats(dirname):
 #    dump_dir_stats(STORAGE_DIRS[0]['PATH'])
 #    assert True
 
-def run_stage(monkeypatch, caplog, stage, archive, encrypt=None):
+def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None):
+    class Config(backup.Config):
+         pass
+
     prepare_stage(stage, clean=(stage==1))
     archive_dir = STORAGE_DIRS[archive]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
     expected_file = os.path.join(DATA_DIR, f"stage{ stage }_db.json")
+    monkeypatch.setattr("backup.Config", Config)  # Don't overwrite defaults
     monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
                                      "--dest", archive_dir,
-                                     "--conf", EXCLUDE_FILE,
+                                     "--snapraid", EXCLUDE_FILE,
                                      data_dir] + 
-                                     (["--enc", encrypt] if encrypt else []))
+                                     (["--enc", encrypt] if encrypt else []) +
+                                     (["--conf", config] if config else []))
     backup.main()
     warn_or_above = [_ for _ in caplog.record_tuples if _[1] > logging.INFO]
     assert not warn_or_above
@@ -272,6 +287,18 @@ def test_stage2_encrypted(monkeypatch, caplog):
 
 def test_stage3_encrypted(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 3, 3, encrypt="abcd1234")
+
+def test_stage1_par2_secfs(monkeypatch, caplog):
+    config = os.path.join(DATA_DIR, "securefs_par2.conf")
+    run_stage(monkeypatch, caplog, 1, 5, encrypt="abcd1234", config=config)
+
+def test_stage2_par2_secfs(monkeypatch, caplog):
+    config = os.path.join(DATA_DIR, "securefs_par2.conf")
+    run_stage(monkeypatch, caplog, 2, 6, encrypt="abcd1234", config=config)
+
+def test_stage3_par2_secfs(monkeypatch, caplog):
+    config = os.path.join(DATA_DIR, "securefs_par2.conf")
+    run_stage(monkeypatch, caplog, 3, 5, encrypt="abcd1234", config=config)
 
 def test_write_storage_id():
     with tempfile.TemporaryDirectory() as _td:
