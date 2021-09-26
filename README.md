@@ -12,6 +12,12 @@ Blaine is NOT designed to provide rapid recovery.  It is more focused on catastr
 as much data as possible can be recovered, but it is acceptable to wait for offline storage to
 become available.
 
+## Key Functionality
+  * Support incremental archiving even when previous archives are offline
+  * Provide file-level deduplication and file validation via SHA1 hashing
+  * Provide file corruption resiliance via PAR2 files
+  * Prevent snooping of archive disks via encryption
+
 The archive process consists of the following parts:
   * Actions applied to the current storage disk:
     These are generaly file copy/move/delete/hardlink operations to copy data/changes
@@ -46,6 +52,12 @@ can be periodically swapped.  For example:
   10. Repeat from step 5
 
 With the above process, at any given time, the maximum amount of data lost is the 1-week difference between DiskC and DiskC'
+
+## Performance
+Blaine Backup is slow.  PAR2 calculation is very CPU intensive, and using disk-encryption also slows the process down.  That said, Blaine uses several methods to improve performance as much as possible:
+  * Use gocryptfs vs securefs (or encfs) for more CPU efficient encryption
+  * Use parpar instaed of par2cmdline For 2-3x performance improvement in PAR2 calculation
+  * Use parallel par2 runs to improve throughput for small files
 
 ## Encryption
 Blaine Backup can use encryption to secure offline disks.  SecureFS is the only tested encryption system, though any system
@@ -82,10 +94,23 @@ provide similar performance to other native filesystems), then data can (theoret
   * linux OS: The code should be portable to MacOS/Windows, but no work has been done on this yet
   * python >= 3.6
   * dc3dd : Fast copy & checksum in a single step
-  * par2 (optional): Calculate parity to avoid bitrot
-  * securefs(optional): Provide encryption
+  * parpar or par2 (optional): Calculate parity to avoid bitrot (parpar is ~3x faster than par2).  **NOTE: par2 0.8.1 has a bug which prevents creating PAR2 files for filenames that are a single character.**
+  * gocryptfs pr securefs(optional): Provide encryption (gocryptfs is significnatly faster than securefs)
 
-## Other considertations
+## Usage
+The easiest way to use Blaine is via Docker.  The included Dockerfile will build an image containingall needed dependencies (gocrypt, parpar, dc3dd) as well as alternate options (a patched version of par2 allowing single-character filenames, securefs).
+
+To run in Docker:
+    docker build --tag blainebackup .
+    docker run --rm -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v <path to data>:<path to data>:ro -v <backup_dir>:/mnt/backup -u 0 blainebackup:latest
+    ./backup.py --enc <encryption password> --db <<path to data>/blainebackup.db --dest /mnt/backup <path to data>
+
+## Testing
+Tests are designed to be run in a Docker container for reproducibility:
+    docker build --tag blainebackup:test --build-arg TEST=1 .
+    docker run --rm -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v $PWD:/work pytest --cov=backup --cov-report term-missing -vv test
+
+## Other considerations
 
 There are enterprise level archive solutions that can do most of what Blaine can do such as Amanda
 or Bacula.  However, they tend to be complicated to setup and maintain, and none offer all the

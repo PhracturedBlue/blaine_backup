@@ -862,8 +862,7 @@ class Backup:
         # Do not run any sql queries while iterating!
         for obj in self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files"):
             item = FileObj(*obj)
-            #FIXME
-            if item.path in seen: # or ... not any(_ in item.pah for _ in paths):
+            if item.path in seen or not any(item.path.startswith(_) for _ in paths):
                 continue
             self.removed += 1
             if item.storage_id == self.storage_id:
@@ -894,15 +893,22 @@ def backup_db(db_file):
 
 def parse_exclude(exclusion_file):
     """Generate exclusion list in RE format"""
-    exclude = []
+    exclude_dirs = []
+    exclude_files = []
     if exclusion_file:
         with open(exclusion_file) as _fh:
             for line in _fh.readlines():
                 if line.startswith("exclude"):
-                    res = fnmatch.translate(line.strip().split(None, 1)[-1])
-                    logging.debug("Adding exclusion for: %s", res)
-                    exclude.append(re.compile(res))
-    return exclude
+                    pattern = line.strip().split(None, 1)[-1]
+                    if pattern[-1] == '/':
+                        res = fnmatch.translate(pattern[:-1])
+                        logging.debug("Adding exclusion for: %s", res)
+                        exclude_dirs.append(re.compile(res))
+                    else:
+                        res = fnmatch.translate(pattern)
+                        logging.debug("Adding exclusion for: %s", res)
+                        exclude_files.append(re.compile(res))
+    return (exclude_dirs, exclude_files)
 
 def parse_config(configfile, parser):
     """Parse config file"""
@@ -966,18 +972,19 @@ def parse_cmdline():
 def backup_path(backup, basepath, exclude, seen):
     """Run backup on a directory"""
     backup.set_data_mount(basepath)
+    exclude_dirs, exclude_files = exclude
     for root, dirs, files in os.walk(basepath):
         filtered_dirs = []
         for dirname in sorted(dirs):
             path = os.path.join(root, dirname)
-            if any(_exc.search(path) for _exc in exclude):
+            if any(_exc.search(path) for _exc in exclude_dirs):
                 logging.debug("Excluding %s", path)
                 continue
             filtered_dirs.append(path)
         dirs[:] = filtered_dirs
         for fname in sorted(files):
             path = os.path.join(root, fname)
-            if any(_exc.search(path) for _exc in exclude):
+            if any(_exc.search(path) for _exc in exclude_files):
                 logging.debug("Excluding %s", path)
                 continue
             seen.add(path)
@@ -1001,8 +1008,8 @@ def main():
             upgrade_schema(cur, schema)
         backup.sync_storage_db()
         seen = set()
+        args.paths = [os.path.abspath(_) for _ in args.paths]
         for basepath in args.paths:
-            basepath = os.path.abspath(basepath)
             backup_path(backup, basepath, exclude, seen)
         if args.clean:
             backup.clean_storage(seen, args.paths)

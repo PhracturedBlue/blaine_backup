@@ -197,19 +197,19 @@ def verify_data(data_dir, db_file, exclude_file):
     cur.execute("SELECT * from files ORDER BY path ASC")
     fileobjs = cur.fetchall()
     con.close()
-    exclude = backup.parse_exclude(exclude_file)
+    exclude_dirs, exclude_files = backup.parse_exclude(exclude_file)
     seen = set()
     for root, dirs, files in os.walk(data_dir):
         filtered_dirs = []
         for dirname in sorted(dirs):
             path = os.path.join(root, dirname)
-            if any(_exc.search(path) for _exc in exclude):
+            if any(_exc.search(path) for _exc in exclude_dirs):
                 continue
             filtered_dirs.append(path)
         dirs[:] = filtered_dirs
         for fname in files:
             path = os.path.join(root, fname)
-            if any(_exc.search(path) for _exc in exclude):
+            if any(_exc.search(path) for _exc in exclude_files):
                 continue
             seen.add(path)
             val = next((_ for _ in fileobjs if _['path'] == path), None)
