@@ -101,12 +101,14 @@ provide similar performance to other native filesystems), then data can (theoret
 The easiest way to use Blaine is via Docker.  The included Dockerfile will build an image containingall needed dependencies (gocrypt, parpar, dc3dd) as well as alternate options (a patched version of par2 allowing single-character filenames, securefs).
 
 To run in Docker:
+
     docker build --tag blainebackup .
     docker run --rm -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v <path to data>:<path to data>:ro -v <backup_dir>:/mnt/backup -u 0 blainebackup:latest
     ./backup.py --enc <encryption password> --db <<path to data>/blainebackup.db --dest /mnt/backup <path to data>
 
 ## Testing
 Tests are designed to be run in a Docker container for reproducibility:
+
     docker build --tag blainebackup:test --build-arg TEST=1 .
     docker run --rm -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v $PWD:/work pytest --cov=backup --cov-report term-missing -vv test
 
