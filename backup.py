@@ -61,6 +61,7 @@ import configparser
 import fnmatch
 import glob
 import hashlib
+import json
 import logging
 import os
 import re
@@ -68,6 +69,7 @@ import sqlite3
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 import signal
@@ -676,9 +678,13 @@ class Backup:
         self.cur.connection.commit()
         self.cur.execute("DETACH storage_db")
 
+    def get_storage_db_file(self):
+        """Get path to starage db file"""
+        return os.path.join(self.storage_root, Config.STORAGE_BACKUP_DB)
+
     def write_storage_db(self):
         """Write the relevant files data for the current storage disk to the storage-local db"""
-        storage_db = os.path.join(self.storage_root, Config.STORAGE_BACKUP_DB)
+        storage_db = self.get_storage_db_file()
         logging.debug("Writing updated storage for %s (%s)", self.storage_id, storage_db)
         if not os.path.exists(storage_db):
             sqldb = sqlite3.connect(storage_db,
@@ -910,23 +916,29 @@ def parse_exclude(exclusion_file):
                         exclude_files.append(re.compile(res))
     return (exclude_dirs, exclude_files)
 
-def parse_config(configfile, parser):
+def parse_config(configfile, remaining_argv, parser):
     """Parse config file"""
-    args = [_.dest for _ in parser._actions]
+    parser_args = {}
+    defaults = {}
+    for cmd_parser in [parser] + list(parser._subparsers._group_actions[0].choices.values()):
+        parser_args[cmd_parser] = [_.dest for _ in cmd_parser._actions]
+        defaults[cmd_parser] = {}
     config = configparser.ConfigParser()
     config.read(configfile)
-    defaults = {}
     for key in config['DEFAULT']:
         try:
             if getattr(Config, key.upper()):
                 setattr(Config, key.upper(), config['DEFAULT'][key])
         except AttributeError:
-            if key in args:
-               defaults[key] = config['DEFAULT'][key]
-            else:
+            seen = False
+            for cmd_parser, args in parser_args.items():
+                if key in args:
+                    defaults[cmd_parser][key] = config['DEFAULT'][key]
+                    seen = True
+            if not seen:
                 logging.warning("Ignoring invalid config key: %s", key)
-    if defaults:
-        parser.set_defaults(**defaults)
+    for cmd_parser, items in defaults.items():
+        cmd_parser.set_defaults(**items)
 
 def parse_cmdline():
     """Parse cmdline args"""
@@ -945,28 +957,51 @@ def parse_cmdline():
         # Inherit options from config_parser
         parents=[conf_parser]
         )
-    parser.add_argument('paths', metavar='PATH', nargs='+', help='Paths to archive')
+    subparsers = parser.add_subparsers(required=True)
     parser.add_argument("--config", help="Config file")
-    parser.add_argument("--snapraid", help="Snapraid config file")
-    parser.add_argument("--database", "--db", required=True, help="Snapraid config file")
-    parser.add_argument("--dest_dir", required=True, help="Directory to write files to")
     parser.add_argument("--verbose", action='store_true', help="Increate logging level")
     parser.add_argument("--encrypt", metavar='KEY', help="Enable encryption, using specificed key")
-    parser.add_argument("--par2_threads", "--threads", default=multiprocessing.cpu_count(),
+    parser.add_argument("--logfile", help="Write to logfile")
+    p_backup = subparsers.add_parser("backup", help="Run backup")
+    p_backup.set_defaults(func=do_backup)
+    p_backup.add_argument('paths', metavar='PATH', nargs='+', help='Paths to archive')
+    p_backup.add_argument("--snapraid_conf", help="Snapraid config file (used for automatic file exclusions)")
+    p_backup.add_argument("--database", "--db", required=True, help="path to database")
+    p_backup.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
+    p_backup.add_argument("--par2_threads", "--threads", default=multiprocessing.cpu_count(),
                         type=int,  help="Enable encryption, using specificed key")
-    parser.add_argument("--par2_threshold", default=10_000_000, type=int,
+    p_backup.add_argument("--par2_threshold", default=10_000_000, type=int,
                         help="Files larger than this use a single multi-threaded par2 call instead"
                              " of using multiple single-threaded par2 calls")
-    parser.add_argument("--no-clean", dest='clean', action='store_false',
-                        help="Increate logging level")
+    p_backup.add_argument("--no-clean", dest='clean', action='store_false', default=True,
+                        help="Don't remove files for backup-storage that have been removed")
+    p_list = subparsers.add_parser("list", help="List backed-up files")
+    p_list.set_defaults(func=do_list)
+    p_list.add_argument('paths', metavar='PATH', nargs='*', help="Paths to list (use glob syntax.  Note that '*' will match '/' too)")
+    p_list.add_argument("--database", "--db", help="path to database")
+    p_list.add_argument("--blaine_dir", help="Path to archive")
+    p_list.add_argument("--local", action="store_true", help="Show only files available on mounted storage")
+    p_list.add_argument("--volumes", nargs="+", default=[], help="Show only files from specified volumes")
+    p_list.add_argument("--iso8601", action="store_true", help="Print file date in ISO8601 format")
+    p_list.add_argument("--no-vol", dest="vol", action="store_false", default=True,
+                        help="Don't print the volume containing each file")
+    p_list.add_argument("-1", dest="path_only", action="store_true", help="Only print filename")
+    p_list.add_argument("--sort", choices=["path", "mtime", "size", "vol"], help="Sort output")
+    p_list.add_argument("--reverse", action="store_true", help="Reverse sort order")
+    p_list.add_argument("--json", action="store_true", help="Output in JSON format")
 
     args, remaining_argv = conf_parser.parse_known_args()
     if args.config_file:
-        parse_config(args.config_file, parser)
+        parse_config(args.config_file, remaining_argv, parser)
     args = parser.parse_args(remaining_argv)
+    handlers = [logging.StreamHandler()]
+    if args.logfile:
+        handlers.append(logging.FileHandler(args.logfile))
     logging.basicConfig(
         format='%(asctime)s %(levelname)-8s %(message)s',
-        level=logging.DEBUG if args.verbose else logging.INFO)
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        handlers=handlers)
+             
     return args
 
 def backup_path(backup, basepath, exclude, seen):
@@ -991,15 +1026,14 @@ def backup_path(backup, basepath, exclude, seen):
             if backup.handle_path(path):
                 backup.calculate_par2(path)
 
-def main():
-    """Entrypoint"""
-    args = parse_cmdline()
+def do_backup(args):
     exclude = parse_exclude(args.snapraid)
     backup_db(args.database)
     sqldb = sqlite3.connect(args.database,
                             detect_types=sqlite3.PARSE_DECLTYPES)
     cur = sqldb.cursor()
     backup = None
+    ok_ = False
     try:
         backup = Backup(cur, args.dest_dir, encrypt=args.encrypt, par2_threads=args.par2_threads,
                         par2_threshold=args.par2_threshold)
@@ -1014,6 +1048,7 @@ def main():
         if args.clean:
             backup.clean_storage(seen, args.paths)
         backup.write_storage_db()
+        ok_ = True
     except KeyboardInterrupt:
         backup.write_storage_db()
     except DiskFullException as _e:
@@ -1029,6 +1064,110 @@ def main():
             backup.encrypt.stop()
     if backup:
         backup.show_summary()
+    return ok_
+
+def simple_table(data, header=None):
+    if not data:
+        return
+    if header:
+        col_len = [len(_) for _ in header]
+    else:
+        col_len = [0 for _ in data[0]]
+    max_len = len(col_len)
+    for item in data:
+        col_len = [max(_, len(str(item[i]))) for i, _ in enumerate(col_len)]
+    row_fmt = "".join([f"%{_+4 if i > 0 else -(_+4)}s" for i, _ in enumerate(col_len)])
+    if header:
+        print(row_fmt % tuple(header))
+    for item in data:
+        print(row_fmt % tuple(item[:max_len]))
+
+def do_list(args):
+    cur = None
+    sqldb = None
+    backup = None
+    if not args.database and not args.blaine_dir:
+        logging.error("Must specify one of --database or --blaine_dir")
+        return False
+    if args.database and os.path.exists(args.database):
+        sqldb = sqlite3.connect(f'file:{args.database}?mode=ro', uri=True,
+                                detect_types=sqlite3.PARSE_DECLTYPES)
+        cur = sqldb.cursor()
+    try:
+        backup = Backup(cur, args.blaine_dir, encrypt=args.encrypt)
+        if not cur:
+            dbfile = backup.get_storage_db_file()
+            if not os.path.exists(dbfile):
+                logging.error("No database specified, and no database found in backup area")
+                return False
+            sqldb = sqlite3.connect(f'file:{dbfile}?mode=ro', uri=True,
+                                    detect_types=sqlite3.PARSE_DECLTYPES)
+            backup.cur = cur = sqldb.cursor()
+            sql = "SELECT path, size, time, storage_id FROM files"
+            where = []
+            sqlvars = []
+            if args.local and backup:
+                where.append("storage_id = ?")
+                sqlvars.append(backup.storage_id)
+            if args.paths:
+                where.append("(" + " OR ".join(f"(path GLOB ?)" for _ in args.paths) + ")")
+                sqlvars.extend(args.paths)
+            if args.volumes:
+                where.append("(" + " OR ".join(f"(storage_id LIKE ?)" for _ in args.volumes) + ")")
+                sqlvars.extend(f"{_}%" for _ in args.volumes)
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            if args.sort:
+                sort_map = {"path": "path", "size": "size", "mtime": "time", "volume": "storage_id"}
+                sort = sort_map[args.sort]
+            else:
+                sort = "path"
+            sql += f" ORDER BY {sort}"
+            if args.reverse:
+                sql += " DESC"
+            cur.execute(sql, sqlvars)
+            items = []
+            year = datetime.now().year
+            for path, size, mtime, vol in cur.fetchall():
+                if args.json:
+                    items.append({
+                        'path': path,
+                        'size': size,
+                        'mtime': datetime.fromtimestamp(mtime).isoformat(),
+                        'volume': vol})
+                    continue
+                if args.path_only:
+                    items.append((path,))
+                    continue
+                mtime = datetime.fromtimestamp(int(mtime))
+                if args.iso8601:
+                    mtime = mtime.isoformat()
+                elif mtime.year == year:
+                    mtime = mtime.strftime("%b %d %H:%M")
+                else:
+                    mtime = mtime.strftime("%b %d %Y")
+                items.append((path, size, mtime, vol))
+            if args.json:
+                print(json.dumps(items))
+            else:
+                if  args.path_only:
+                    for _ in items:
+                        print(_)
+                else:
+                    header = ["path", "size", "modified"] + (["volume"] if args.vol else [])
+                    simple_table(items, header=header)
+             
+    finally:
+        if sqldb:
+            sqldb.close()
+        if backup:
+            backup.encrypt.stop()
+ 
+
+def main():
+    """Entrypoint"""
+    args = parse_cmdline()
+    return args.func(args)
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    sys.exit(0 if main() else 1)
