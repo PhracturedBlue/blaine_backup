@@ -11,7 +11,7 @@ RUN ./build-without-openssl.bash
 # We build par2cmdline from source due to needing a fix for
 # https://github.com/Parchive/par2cmdline/issues/145
 # Which is not included in v0.8.1
-FROM debian:bullseye-slim as par2_builder
+FROM debian:bookworm-slim as par2_builder
 ARG PAR2CMDLINE_VER=29cab44c1f4139a385c1267dce9ea039802d2d36
 RUN apt-get update -y && \
     apt-get install -y build-essential wget unzip automake && \
@@ -31,7 +31,7 @@ RUN ./automake.sh && \
     make && \
     make check
 
-FROM node:bullseye-slim
+FROM node:bookworm-slim
 
 ARG UID=1000
 ARG GID=1000
@@ -52,7 +52,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/* /tmp/* /src
 
 
-RUN if [ "$TEST" != "" ]; then pip install pytest pylint coverage pytest-cov; fi
+RUN if [ "$TEST" != "" ]; then pip install --break-system-packages pytest pylint coverage pytest-cov; fi
 
 COPY --from=par2_builder /src/par2 /usr/local/bin/par2
 COPY --from=gocryptfs_builder /work/gocryptfs /work/gocryptfs-xray /usr/local/bin/
