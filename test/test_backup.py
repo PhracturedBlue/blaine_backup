@@ -12,7 +12,7 @@ from contextlib import contextmanager
 import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-import backup
+import blaine
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
 EXCLUDE_FILE = os.path.join(DATA_DIR, "snapraid.conf")
@@ -68,6 +68,7 @@ def prepare_stage(stage_num, clean=False):
                     continue
                 path = os.path.join(root, fname)
                 if ".rename_from." in fname:
+                    # create a hardlink from the original name in the previous stage to the new-name in the current stage
                     prev_path = os.path.join(root, fname.split('.rename_from.')[-1])
                     prev_path = prev_path.replace(dest_dir, dest_dir + ".tmp")
                     rename_to = os.path.join(root, fname.split('.rename_from.')[0])
@@ -77,6 +78,7 @@ def prepare_stage(stage_num, clean=False):
                 prev_path = path.replace(dest_dir, dest_dir + ".tmp")
                 if (not path.endswith('.nolink') and os.path.exists(prev_path) and 
                         os.system(f"diff -q { prev_path } { path } > /dev/null") == 0):
+                    # previous stage and current stage have the same file with the same contents, so replace with a hardlink
                     os.unlink(path)
                     os.link(prev_path, path)
         shutil.rmtree(dest_dir + ".tmp")
@@ -98,13 +100,14 @@ def do_encrypt(encryption_key, storage_dir):
     if not encryption_key:
         yield storage_dir
         return
-    enc = backup.Encrypt(storage_dir, encryption_key)
+    enc = blaine.Encrypt(storage_dir, encryption_key)
     try:
         yield enc.setup_encryption()
     finally:
         enc.stop()
 
 def verify_db(db_file, expected_file, storage_id=None):
+    """Verify that the database matches the exected state"""
     def dict_factory(cursor, row):
         d = {}
         for idx, col in enumerate(cursor.description):
@@ -149,6 +152,7 @@ def verify_db(db_file, expected_file, storage_id=None):
     assert actions == expected['actions']
 
 def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
+    """Verify the archive files match the expected state"""
     with open(expected_file) as _fh:
         expected = json.load(_fh)
     orig_data_dir = expected['orig_data_dir']
@@ -178,7 +182,7 @@ def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
                     assert(os.path.exists(arc_path + ".par2"))
                 with open(arc_path, "rb") as _fh:
                     sha1 = hashlib.sha1(_fh.read()).hexdigest()
-            assert val['sha1'] == sha1
+            assert val['sha1'] == sha1, f"Archive has wrong SHA for {data_path}"
             if not encrypt:
                 # encryption masks hardlinks
                 if sha1 in shamap:
@@ -191,13 +195,14 @@ def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
         assert obj['path'] in seen, f"{obj['path']} is in DB but not in archive"
 
 def verify_data(data_dir, db_file, exclude_file):
+    """Verify the database matches the data directory"""
     con = sqlite3.connect(db_file)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
     cur.execute("SELECT * from files ORDER BY path ASC")
     fileobjs = cur.fetchall()
     con.close()
-    exclude_dirs, exclude_files = backup.parse_exclude(exclude_file)
+    exclude_dirs, exclude_files = blaine.parse_exclude(exclude_file)
     seen = set()
     for root, dirs, files in os.walk(data_dir):
         filtered_dirs = []
@@ -245,22 +250,28 @@ def dump_dir_stats(dirname):
 #    assert True
 
 def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None):
-    class Config(backup.Config):
+    class Config(blaine.Config):
          pass
+
+    history = []
+    def logger(self, cmd, *path):
+        history.append((cmd, *path))
 
     prepare_stage(stage, clean=(stage==1))
     archive_dir = STORAGE_DIRS[archive]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
     expected_file = os.path.join(DATA_DIR, f"stage{ stage }_db.json")
-    monkeypatch.setattr("backup.Config", Config)  # Don't overwrite defaults
-    monkeypatch.setattr("sys.argv", ["app", "--db", db_file,
+    monkeypatch.setattr("blaine.Config", Config)  # Don't overwrite defaults
+    monkeypatch.setattr("blaine.Blaine.logger", logger)
+    monkeypatch.setattr("sys.argv", ["app", "backup", "--db", db_file,
                                      "--dest", archive_dir,
                                      "--snapraid", EXCLUDE_FILE,
+                                     "--clean",
                                      data_dir] + 
                                      (["--enc", encrypt] if encrypt else []) +
                                      (["--conf", config] if config else []))
-    backup.main()
+    blaine.main()
     warn_or_above = [_ for _ in caplog.record_tuples if _[1] > logging.INFO]
     assert not warn_or_above
     verify_db(db_file, expected_file)
@@ -270,51 +281,37 @@ def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None):
         verify_db(os.path.join(storage_dir, ".backup_db.sqlite3"),
               expected_file, STORAGE_DIRS[archive]['ID'])
 
-def test_stage1_archive(monkeypatch, caplog):
+def test_stage123_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 1, 1)
-
-def test_stage2_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 2, 2)
-
-def test_stage3_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 3, 1)
 
-def test_stage1_encrypted(monkeypatch, caplog):
+def test_stage123_encrypted(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 1, 3, encrypt="abcd1234")
-
-def test_stage2_encrypted(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 2, 4, encrypt="abcd1234")
-
-def test_stage3_encrypted(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 3, 3, encrypt="abcd1234")
 
-def test_stage1_par2_secfs(monkeypatch, caplog):
-    config = os.path.join(DATA_DIR, "securefs_par2.conf")
+def test_stage123_par2_secfs(monkeypatch, caplog):
+    config = os.path.join(DATA_DIR, "securefs_par2.toml")
     run_stage(monkeypatch, caplog, 1, 5, encrypt="abcd1234", config=config)
-
-def test_stage2_par2_secfs(monkeypatch, caplog):
-    config = os.path.join(DATA_DIR, "securefs_par2.conf")
     run_stage(monkeypatch, caplog, 2, 6, encrypt="abcd1234", config=config)
-
-def test_stage3_par2_secfs(monkeypatch, caplog):
-    config = os.path.join(DATA_DIR, "securefs_par2.conf")
     run_stage(monkeypatch, caplog, 3, 5, encrypt="abcd1234", config=config)
 
 def test_write_storage_id():
     with tempfile.TemporaryDirectory() as _td:
-        storage_id = backup._set_storage_id(_td)
+        storage_id = blaine._set_storage_id(_td, create=True)
         assert os.path.exists(os.path.join(_td, ".backup_id"))
-        storage_id2 = backup._set_storage_id(_td)
+        storage_id2 = blaine._set_storage_id(_td)
         assert storage_id == storage_id2
 
 def test_invalid_action():
     try:
-        backup.Backup.append_action(None, "INVALID", "storage_id", "path1", "path2")
+        blaine.Blaine.append_action(None, "INVALID", "storage_id", "path1", "path2")
         assert False, "Expected exception fom append_action"
     except Exception as _e:
         assert str(_e) == "unsupported action: INVALID"
     try:
-        backup.Backup.append_action(None, "RENAME", "storage_id", "path1", None)
+        blaine.Blaine.append_action(None, "RENAME", "storage_id", "path1", None)
         assert False, "Expected exception fom append_action"
     except Exception as _e:
         assert str(_e) == "No destination for action RENAME path1"

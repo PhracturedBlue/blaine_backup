@@ -155,15 +155,43 @@
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
-      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk",
+      "path": "/archive/subdir3/f1_rename_to_f2_and_replace",
       "inode": 1017,
+      "sha1": "6a51f7cab00e5fad3bacbe14d558e5db31d41c4a",
+      "size": 28,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/f2",
+      "inode": 1018,
+      "sha1": "1c49a440c352f3473efa9512255033b94dc7def0",
+      "size": 3,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/f3",
+      "inode": 1019,
+      "sha1": "b4c4c2a335010e242576b05f3e0b673adfa58bc8",
+      "size": 3,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/f4_rename_to_f3_and_replace",
+      "inode": 1020,
+      "sha1": "a5d57d7e9992762b37a1033a9181b1aec30946f0",
+      "size": 28,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk",
+      "inode": 1021,
       "sha1": "733d24c73f798342c9ad4ef5e26661cb405b5bff",
       "size": 43,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
       "path": "/archive/subdir3/file_to_rename_overwrite_same_disk_dest",
-      "inode": 1018,
+      "inode": 1022,
       "sha1": "a239f1cf83385ae7af8313d4170b521169efa276",
       "size": 48,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -173,6 +201,20 @@
       "inode": 1001,
       "sha1": "38be7d1b981f2fb6a4a0a052453f887373dc1fe8",
       "size": 6,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/swap1_to_swap2",
+      "inode": 1023,
+      "sha1": "c7a8b8b828f78a81484850611ddbcc4340e29b56",
+      "size": 15,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/swap2_to_swap1",
+      "inode": 1024,
+      "sha1": "37c0e86176d3bb2f3b53851b72612b67f9cc3f84",
+      "size": 15,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     }
   ],

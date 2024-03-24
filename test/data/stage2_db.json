@@ -23,7 +23,7 @@
     },
     {
       "path": "/archive/subdir1/file_change_inode.nolink",
-      "inode": 1019,
+      "inode": 1025,
       "sha1": "0ffde8bc94be78570c240ef98789c87fc106bf33",
       "size": 33,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -58,14 +58,14 @@
     },
     {
       "path": "/archive/subdir2/copy_of_subdir1_file1_to_edit",
-      "inode": 1020,
+      "inode": 1026,
       "sha1": "7da201da58dfcc90ccf2faf99502bab9eebc7aea",
       "size": 20,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
       "path": "/archive/subdir2/file2",
-      "inode": 1021,
+      "inode": 1027,
       "sha1": "1a2f9268d006ddbf4b884f692f53e9b63798cf21",
       "size": 14,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
@@ -86,14 +86,14 @@
     },
     {
       "path": "/archive/subdir2/hardlink_to_changed_file",
-      "inode": 1020,
+      "inode": 1026,
       "sha1": "7da201da58dfcc90ccf2faf99502bab9eebc7aea",
       "size": 20,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
     },
     {
       "path": "/archive/subdir2/new_copy_of_subdir1_file1",
-      "inode": 1022,
+      "inode": 1028,
       "sha1": "5ab9a4f382fc786c21e08b4286defc9716fd686e",
       "size": 14,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -114,7 +114,7 @@
     },
     {
       "path": "/archive/subdir2/symlink_subdir1_file1_to_redirect",
-      "inode": 1023,
+      "inode": 1029,
       "sha1": "cb99b709a1978bd205ab9dfd4c5aaa1fc91c7523",
       "size": 5,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"
@@ -141,15 +141,43 @@
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
-      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk",
+      "path": "/archive/subdir3/f1_rename_to_f2_and_replace",
       "inode": 1017,
+      "sha1": "6a51f7cab00e5fad3bacbe14d558e5db31d41c4a",
+      "size": 28,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/f2",
+      "inode": 1018,
+      "sha1": "1c49a440c352f3473efa9512255033b94dc7def0",
+      "size": 3,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/f3",
+      "inode": 1019,
+      "sha1": "b4c4c2a335010e242576b05f3e0b673adfa58bc8",
+      "size": 3,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/f4_rename_to_f3_and_replace",
+      "inode": 1020,
+      "sha1": "a5d57d7e9992762b37a1033a9181b1aec30946f0",
+      "size": 28,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/file_to_rename_overwrite_same_disk",
+      "inode": 1021,
       "sha1": "733d24c73f798342c9ad4ef5e26661cb405b5bff",
       "size": 43,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
       "path": "/archive/subdir3/file_to_rename_overwrite_same_disk_dest",
-      "inode": 1018,
+      "inode": 1022,
       "sha1": "a239f1cf83385ae7af8313d4170b521169efa276",
       "size": 48,
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
@@ -162,8 +190,22 @@
       "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
     },
     {
-      "path": "/archive/subdir3/symlink_file1",
+      "path": "/archive/subdir3/swap1_to_swap2",
+      "inode": 1023,
+      "sha1": "c7a8b8b828f78a81484850611ddbcc4340e29b56",
+      "size": 15,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/swap2_to_swap1",
       "inode": 1024,
+      "sha1": "37c0e86176d3bb2f3b53851b72612b67f9cc3f84",
+      "size": 15,
+      "storage_id": "archive1-e35d-45ee-a085-d9eddf7152ca"
+    },
+    {
+      "path": "/archive/subdir3/symlink_file1",
+      "inode": 1030,
       "sha1": "f170e469d5afc4fd0116203882cd768449331d17",
       "size": 8,
       "storage_id": "archive2-3dcc-49e9-a70e-8f6499426986"

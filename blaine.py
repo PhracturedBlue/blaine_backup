@@ -57,7 +57,7 @@
 # FUTURE:
 #  * cleanup actions on current storage
 import argparse
-import configparser
+import ctypes
 import fnmatch
 import glob
 import hashlib
@@ -71,6 +71,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 import uuid
 import signal
 import time
@@ -95,6 +96,7 @@ class Config:
     #                  ":ENCRYPT_DIR: :STORAGE_ROOT:")
     ENCRYPT_CREATE = "gocryptfs -init --passfile :KEYFILE: :ENCRYPT_DIR:"
     ENCRYPT_MOUNT = ("gocryptfs -fg --passfile :KEYFILE: :ENCRYPT_DIR: :STORAGE_ROOT:")
+    ENCRYPT_MOUNT_RO = ("gocryptfs -fg -ro --passfile :KEYFILE: :ENCRYPT_DIR: :STORAGE_ROOT:")
     ENCRYPT_UNMOUNT = "fusermount -u :STORAGE_ROOT:"
     STORAGE_BACKUP_DB = ".backup_db.sqlite3"
     STORAGE_BACKUP_ID = ".backup_id"
@@ -102,10 +104,11 @@ class Config:
     STORAGE_BACKUP_DEC = "data"
 
 FileObj = namedtuple("FileObj", ["path", "inode", "sha1", "time", "size", "storage_id"])
+LStat = namedtuple("LStat", ["st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime"])
 
 # Convert unsigned 64bit inodes to signed for sqlite3
-sqlite3.register_adapter(int, lambda i: (i + 2**63) % 2**64 - 2**63)
-sqlite3.register_converter('integer', lambda i: int(i) % 2**64)
+#sqlite3.register_adapter(int, lambda i: (i + 2**63) % 2**64 - 2**63)
+#sqlite3.register_converter('integer', lambda i: int(i) % 2**64)
 
 class BackupException(Exception):
     """Base Exception"""
@@ -120,10 +123,11 @@ class EncryptionException(Exception):
 class Encrypt:
     """Manage encryption"""
 
-    def __init__(self, storage_root, encryption_key):
+    def __init__(self, storage_root, encryption_key, read_only=False):
         self.enc_proc = None
         self.storage_root = storage_root
         self.encryption_key = encryption_key
+        self.read_only = read_only
 
         def signal_handler(_num, _stack):
             """Trigger an exception if the encryption process fails"""
@@ -196,7 +200,7 @@ class Encrypt:
                 return self.storage_root
             if os.path.lexists(storage_db) or glob.glob(os.path.join(self.storage_root,"*")):
                 raise BackupException(f"Volume {self.storage_root} already contains "
-                                      " unencrypted data, but encryption was requested")
+                                      "unencrypted data, but encryption was requested")
             with self.create_keyfile() as keyfile:
                 create_cmd = self.apply_enc_vars(Config.ENCRYPT_CREATE,
                                                  keyfile, encrypt_dir, decrypt_dir)
@@ -219,7 +223,8 @@ class Encrypt:
                                   "Unmount before rerunning")
         # This isn't secure, but it isn't meant to be
         with self.create_keyfile() as keyfile:
-            mount_cmd = self.apply_enc_vars(Config.ENCRYPT_MOUNT, keyfile, encrypt_dir, decrypt_dir)
+            encrypt_mount = Config.ENCRYPT_MOUNT_RO if self.read_only else Config.ENCRYPT_MOUNT
+            mount_cmd = self.apply_enc_vars(encrypt_mount, keyfile, encrypt_dir, decrypt_dir)
             logging.debug("Mounting encrypted dir: %s", " ".join(mount_cmd))
             self.enc_proc = multiprocessing.Process(
                 target=self._start_encryption,
@@ -268,10 +273,10 @@ class Par2Queue:
         logging.debug("Completed PAR2 Job: %s", self.jobs[pid][0])
         path = self.jobs[pid][1]
         if os.path.exists(path + ".par2"):
-            lstat_p = os.lstat(path + ".par2")
+            lstat_p = blaine_lstat(path + ".par2")
             size += lstat_p.st_size
             for par2path in glob.glob(f"{ path }.vol*.par2"):
-                lstat_p = os.lstat(par2path)
+                lstat_p = blaine_lstat(par2path)
                 size += lstat_p.st_size
         del self.jobs[pid]
         del self.jobs_by_fname[path]
@@ -308,7 +313,7 @@ class Par2Queue:
     def create(self, fname):
         """Run par2 create"""
         try:
-            lstat = os.lstat(fname)
+            lstat = blaine_lstat(fname)
             size = lstat.st_size
         except Exception:
             return 0
@@ -351,6 +356,20 @@ class Par2Queue:
                 logging.error(_e)
                 break
         return size
+
+def blaine_lstat(path):
+    _l = os.lstat(path)
+    return LStat(
+        st_mode=_l.st_mode,
+        st_ino=ctypes.c_int64(_l.st_ino).value,
+        st_dev=_l.st_dev,
+        st_nlink=_l.st_nlink,
+        st_uid=_l.st_uid,
+        st_gid=_l.st_gid,
+        st_size=_l.st_size,
+        st_atime=_l.st_atime,
+        st_mtime=_l.st_mtime,
+        st_ctime=_l.st_ctime)
 
 def get_schema(cur):
     """Fetch current DB schema"""
@@ -398,17 +417,18 @@ def calc_symlink_hash(path):
     return hashlib.sha1(os.readlink(path.encode('utf8'))).hexdigest()
 
 
-def _set_storage_id(storage_root):
+def _set_storage_id(storage_root, create=False):
     """Read existing storage id, or generate a new one"""
     id_file = os.path.join(storage_root, Config.STORAGE_BACKUP_ID)
     if os.path.exists(id_file):
         with open(id_file) as _fh:
             return _fh.readline().strip()
-    else:
+    elif create:
         with open(id_file, "w") as _fh:
             storage_id = str(uuid.uuid4())
             _fh.write(storage_id)
         return storage_id
+    raise BackupException("Storage area is not initialized")
 
 def get_storage_free(storage_root):
     """Determine free space of the archive disk"""
@@ -421,18 +441,20 @@ def get_storage_free(storage_root):
 class Blaine:
     """Execute a backup"""
     # pylint: disable = too-many-instance-attributes too-many-arguments
-    def __init__(self, cur, storage_dir, reserved_space=None, parity_pct=None, encrypt=None,
-                 par2_threads=None, par2_threshold=10_000_000):
+    def __init__(self, cur, storage_dir, init=False, reserved_space=None, parity_pct=None, encrypt=None,
+                 par2_threads=None, par2_threshold=10_000_000, dry_run=False, logger=None):
         """Initialize"""
         self.skipped = 0
         self.added = 0
         self.removed = 0
         self.modified = 0
         self.cur = cur
-        self.encrypt = Encrypt(storage_dir, encrypt)
+        self.dry_run = dry_run
+        self.log = logger or self.logger
+        self.encrypt = Encrypt(storage_dir, encrypt, read_only=dry_run)
         self.par2q = Par2Queue(par2_threads, par2_threshold)
         self.storage_root = self.encrypt.setup_encryption()
-        self.storage_id = _set_storage_id(storage_dir)
+        self.storage_id = _set_storage_id(storage_dir, init)
         self.storage_added = 0
         self.storage_reserved = 10_000_000_000 if reserved_space is None else reserved_space
         self.inodes_reserved = 1000
@@ -453,6 +475,21 @@ class Blaine:
         logging.info("Removed files:   %d", self.removed)
         logging.info("Space consumed:  %d bytes", self.storage_added)
 
+    @staticmethod
+    def logger(action, path1, path2=None):
+        action_map = {
+            "DELETE": "Deleting",
+            "RENAME": "Renaming",
+            "HARDLINK": "Hardlinking",
+            "COPY": "Copying",
+            "SYMLINK": "Symlinking",
+            "PAR2": "Creating par files for",
+            }
+        if path2:
+            logging.debug("%s %s to %s", action_map.get(action, action), path1, path2)
+        else:
+            logging.debug("%s %s", action_map.get(action, action), path1)
+
     def storage_path(self, path):
         """Determine the path on the storage disk for a given path"""
         if path[0] == os.path.sep:
@@ -463,7 +500,9 @@ class Blaine:
         """Rename path on storage disks (and update par2 files)"""
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
-        logging.debug("Renaming %s to %s", origpath, newpath)
+        self.log("RENAME", origpath, newpath)
+        if self.dry_run:
+            return
         try:
             os.rename(origpath, newpath)
             if os.path.exists(origpath + ".par2"):
@@ -482,7 +521,9 @@ class Blaine:
         origpath = self.storage_path(origpath)
         newpath = self.storage_path(newpath)
         self.storage_added += self.par2q.wait_file(origpath)
-        logging.debug("Hardlinking %s to %s", origpath, newpath)
+        self.log("HARDLINK", origpath, newpath)
+        if self.dry_run:
+            return
         try:
             os.makedirs(os.path.dirname(newpath), exist_ok=True)
             os.link(origpath, newpath)
@@ -504,9 +545,11 @@ class Blaine:
         path = self.storage_path(path)
         if not os.path.lexists(path):
             return
-        logging.debug("Deleting %s", path)
+        self.log("DELETE", path)
+        if self.dry_run:
+            return
         if not lstat:
-            lstat = os.lstat(path)
+            lstat = blaine_lstat(path)
         try:
             os.unlink(path)
             self.storage_added -= lstat.st_size
@@ -523,16 +566,26 @@ class Blaine:
         if free_inodes < self.inodes_reserved:
             raise DiskFullException(f"Disk {self.storage_root}  has run out of inodes")
         dest = self.storage_path(path)
-        logging.debug("Copying %s to %s", path, dest)
+        self.log("COPY", path, dest)
+        if self.dry_run:
+            if os.path.islink(path):
+                sha1 = calc_symlink_hash(path)
+            else:
+                sha1 = calc_hash(path)
+            self.storage_added += lstat.st_size
+            return sha1
         try:
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if os.path.exists(dest):
+                self.path_unlink(path)
+            else:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
             if os.path.islink(path):
                 link = os.readlink(path)
                 os.symlink(link, dest)
                 sha1 = calc_symlink_hash(path)
             else:
                 sha1 = run_dc3dd(path, dest)
-                # Python doesn't proide 'lutime' function, so no easy way to update symlinks
+                # Python doesn't provide 'lutime' function, so no easy way to update symlinks
                 try:
                     os.chown(dest, lstat.st_uid, lstat.st_gid,
                              follow_symlinks=False)
@@ -545,24 +598,29 @@ class Blaine:
                 os.unlink(dest)
             except Exception:
                 pass
+            breakpoint()
             raise BackupException(f"Failed to copy {path} -> {dest}: {str(_e)}") from _e
         return sha1
 
     def rm_par2(self, storage_path):
         """Remove par2 files, and update stats"""
+        if self.dry_run:
+            return
         if os.path.exists(storage_path + ".par2"):
-            lstat_p = os.lstat(storage_path + ".par2")
+            lstat_p = blaine_lstat(storage_path + ".par2")
             os.unlink(storage_path + ".par2")
             self.storage_added -= lstat_p.st_size
         for par2path in glob.glob(f"{ storage_path }.vol*.par2"):
-            lstat_p = os.lstat(par2path)
+            lstat_p = blaine_lstat(par2path)
             os.unlink(par2path)
             self.storage_added -= lstat_p.st_size
 
     def calculate_par2(self, path):
         """Run PAR2 on path to generate extra parity"""
         path = self.storage_path(path)
-        logging.debug("Creating PAR2 files for %s", path)
+        self.log("PAR2", path)
+        if self.dry_run:
+            return
         try:
             self.rm_par2(path)
             self.storage_added += self.par2q.create(path)
@@ -708,7 +766,7 @@ class Blaine:
         """Take needed action for a given file path"""
         # pylint: disable=too-many-statements too-many-branches too-many-return-statements
         # return True if par2 calc is needed
-        lstat = os.lstat(path)
+        lstat = blaine_lstat(path)
         if stat.S_ISLNK(lstat.st_mode):
             is_symlink = True
             sha1 = calc_symlink_hash(path)
@@ -748,7 +806,7 @@ class Blaine:
         item = self.cur.fetchone()
         if item:
             item = FileObj(*item)
-        if match:
+        if match:  # 'match' contains an item wth a different name but same inode & size
             if not os.path.lexists(match.path):
                 # 2.a rename
                 if not item:
@@ -913,6 +971,15 @@ def backup_db(db_file):
         os.mkdir(backup_dir)
     shutil.copyfile(db_file, outfile)
 
+def connect_db(db_file, read_only=False):
+    """Connect to the database and return a cursor"""
+    uri = f'file:{db_file}'
+    if read_only:
+        uri += "?mode=ro"
+    sqldb = sqlite3.connect(uri, uri=True,
+                            detect_types=sqlite3.PARSE_DECLTYPES)
+    return sqldb.cursor()
+
 def parse_exclude(exclusion_file):
     """Generate exclusion list in RE format"""
     exclude_dirs = []
@@ -939,22 +1006,26 @@ def parse_config(configfile, remaining_argv, parser):
     for cmd_parser in [parser] + list(parser._subparsers._group_actions[0].choices.values()):
         parser_args[cmd_parser] = [_.dest for _ in cmd_parser._actions]
         defaults[cmd_parser] = {}
-    config = configparser.ConfigParser()
-    config.read(configfile)
-    for key in config['DEFAULT']:
+    with open(configfile, "rb") as _fh:
+        config = tomllib.load(_fh)
+    for key in config:
         try:
             if getattr(Config, key.upper()):
-                setattr(Config, key.upper(), config['DEFAULT'][key])
+                setattr(Config, key.upper(), config[key])
         except AttributeError:
             seen = False
             for cmd_parser, args in parser_args.items():
                 if key in args:
-                    defaults[cmd_parser][key] = config['DEFAULT'][key]
+                    defaults[cmd_parser][key] = config[key]
                     seen = True
             if not seen:
                 logging.warning("Ignoring invalid config key: %s", key)
     for cmd_parser, items in defaults.items():
         cmd_parser.set_defaults(**items)
+        for action in cmd_parser._actions:
+            if action.dest in items:
+                action.required = False
+
 
 def parse_cmdline():
     """Parse cmdline args"""
@@ -969,18 +1040,17 @@ def parse_cmdline():
         )
     conf_parser.add_argument("-c", "--config_file",
                         help="Specify config file", metavar="FILE")
+    common = argparse.ArgumentParser(add_help=False, parents=[conf_parser])
+    common.add_argument("--verbose", action='store_true', help="Increate logging level")
+    common.add_argument("--encrypt", metavar='KEY', help="Enable encryption, using specificed key")
+    common.add_argument("--logfile", help="Write to logfile")
     parser = argparse.ArgumentParser(
         # Inherit options from config_parser
-        parents=[conf_parser]
+        parents=[common]
         )
     subparsers = parser.add_subparsers(required=True)
-    parser.add_argument("--config", help="Config file")
-    parser.add_argument("--verbose", action='store_true', help="Increate logging level")
-    parser.add_argument("--encrypt", metavar='KEY', help="Enable encryption, using specificed key")
-    parser.add_argument("--logfile", help="Write to logfile")
     for subparser in (Backup, List):
-        subparser.add_parser(subparsers)
-
+        subparser.add_parser(subparsers, common)
     args, remaining_argv = conf_parser.parse_known_args()
     if args.config_file:
         parse_config(args.config_file, remaining_argv, parser)
@@ -1001,33 +1071,57 @@ def parse_cmdline():
 class Backup:
     """backup subcommand"""
     @classmethod
-    def add_parser(cls, parser):
-        p_backup = parser.add_parser("backup", help="Run backup")
+    def add_parser(cls, parser, common):
+        p_backup = parser.add_parser("backup", parents=[common], help="Run backup")
         p_backup.set_defaults(func=cls.run)
         p_backup.add_argument('paths', metavar='PATH', nargs='+', help='Paths to archive')
         p_backup.add_argument("--snapraid_conf", help="Snapraid config file (used for automatic file exclusions)")
         p_backup.add_argument("--database", "--db", required=True, help="path to database")
         p_backup.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
+        p_backup.add_argument("--init", action="store_true", help="Initialize new storage disk")
+        p_backup.add_argument("--dry_run", action="store_true", help="Don't apply any changes")
         p_backup.add_argument("--par2_threads", "--threads", default=multiprocessing.cpu_count(),
                         type=int,  help="Enable encryption, using specificed key")
         p_backup.add_argument("--par2_threshold", default=10_000_000, type=int,
                             help="Files larger than this use a single multi-threaded par2 call instead"
                                  " of using multiple single-threaded par2 calls")
-        p_backup.add_argument("--no-clean", dest='clean', action='store_false', default=True,
-                            help="Don't remove files for backup-storage that have been removed")
+        p_backup.add_argument("--clean", dest='clean', action='store_true',
+                            help="Remove files from backup-storage that no longer exist in the data-set")
 
     @classmethod
     def run(cls, args):
-        exclude = parse_exclude(args.snapraid)
-        backup_db(args.database)
-        sqldb = sqlite3.connect(args.database,
-                                detect_types=sqlite3.PARSE_DECLTYPES)
-        cur = sqldb.cursor()
+        exclude = parse_exclude(args.snapraid_conf)
+        cur = None
+        tmpdir = None
+        if args.dry_run:
+            tmpdir = tempfile.TemporaryDirectory()
+            tmpdb = f"{tmpdir.name}/database.sqlite"
+        if os.path.exists(args.database):
+            if args.dry_run:
+                shutils.copyfile(args.database, tmpdb)
+                cur = connect_db(tmpdb)
+            else:
+                backup_db(args.database)
+                cur = connect_db(args.database)
         backup = None
         ok_ = False
         try:
-            backup = Blaine(cur, args.dest_dir, encrypt=args.encrypt, par2_threads=args.par2_threads,
-                            par2_threshold=args.par2_threshold)
+            backup = Blaine(cur, args.blaine_dir, init=args.init, encrypt=args.encrypt,
+                            par2_threads=args.par2_threads, par2_threshold=args.par2_threshold,
+                            dry_run=args.dry_run)
+            if not cur:
+                dbfile = backup.get_storage_db_file()
+                if os.path.exists(dbfile):
+                    logging.warning("Did not find database %s.  Using database from backup", args.database)
+                    if args.dry_run:
+                        shutil.copyfile(dbfile, tmpdb)
+                    else:
+                        shutil.copyfile(dbfile, args.database)
+                if not args.dry_run:
+                    backup_db(args.database)
+                    backup.cur = cur = connect_db(args.database)
+                else:
+                    backup.cur = cur = connect_db(tmpdb)
             schema = get_schema(cur)
             if schema != SCHEMA:
                 upgrade_schema(cur, schema)
@@ -1038,6 +1132,9 @@ class Backup:
                 cls.backup_path(backup, basepath, exclude, seen)
             if args.clean:
                 backup.clean_storage(seen, args.paths)
+            else:
+                for path in sorted(seen):
+                    logging.warning("File %s no longer exists, but was not removed from the database", path)
             backup.write_storage_db()
             ok_ = True
         except KeyboardInterrupt:
@@ -1048,8 +1145,9 @@ class Backup:
             logging.error(_e)
             raise
         finally:
-            sqldb.commit()
-            sqldb.close()
+            if cur:
+                cur.connection.commit()
+                cur.connection.close()
             if backup:
                 backup.storage_added += backup.par2q.join()
                 backup.encrypt.stop()
@@ -1084,8 +1182,8 @@ class Backup:
 class List:
     """List subcommand"""
     @classmethod
-    def add_parser(cls, parser):
-        p_list = parser.add_parser("list", help="List backed-up files")
+    def add_parser(cls, parser, common):
+        p_list = parser.add_parser("list", parents=[common], help="List backed-up files")
         p_list.set_defaults(func=cls.run)
         p_list.add_argument('filter', metavar='PATH', nargs='*', help="Paths to list (use glob syntax.  Note that '*' will match '/' too)")
         p_list.add_argument("--database", "--db", help="path to database")
@@ -1103,82 +1201,79 @@ class List:
     @staticmethod
     def run(args):
         cur = None
-        sqldb = None
         backup = None
         if not args.database and not args.blaine_dir:
             logging.error("Must specify one of --database or --blaine_dir")
             return False
         if args.database and os.path.exists(args.database):
-            sqldb = sqlite3.connect(f'file:{args.database}?mode=ro', uri=True,
-                                    detect_types=sqlite3.PARSE_DECLTYPES)
-            cur = sqldb.cursor()
+            cur = connect_db(args.database, read_only=True)
         try:
-            backup = Blaine(cur, args.blaine_dir, encrypt=args.encrypt)
+            backup = Blaine(cur, args.blaine_dir, encrypt=args.encrypt, dry_run=True)
             if not cur:
                 dbfile = backup.get_storage_db_file()
                 if not os.path.exists(dbfile):
                     logging.error("No database specified, and no database found in backup area")
                     return False
-                sqldb = sqlite3.connect(f'file:{dbfile}?mode=ro', uri=True,
-                                        detect_types=sqlite3.PARSE_DECLTYPES)
-                backup.cur = cur = sqldb.cursor()
-                sql = "SELECT path, size, time, storage_id FROM files"
-                where = []
-                sqlvars = []
-                if args.local and backup:
-                    where.append("storage_id = ?")
-                    sqlvars.append(backup.storage_id)
-                if args.filter:
-                    where.append("(" + " OR ".join(f"(path GLOB ?)" for _ in args.filter) + ")")
-                    sqlvars.extend(args.filter)
-                if args.volumes:
-                    where.append("(" + " OR ".join(f"(storage_id LIKE ?)" for _ in args.volumes) + ")")
-                    sqlvars.extend(f"{_}%" for _ in args.volumes)
-                if where:
-                    sql += " WHERE " + " AND ".join(where)
-                if args.sort:
-                    sort_map = {"path": "path", "size": "size", "mtime": "time", "volume": "storage_id"}
-                    sort = sort_map[args.sort]
-                else:
-                    sort = "path"
-                sql += f" ORDER BY {sort}"
-                if args.reverse:
-                    sql += " DESC"
-                cur.execute(sql, sqlvars)
-                items = []
-                year = datetime.now().year
-                for path, size, mtime, vol in cur.fetchall():
-                    if args.json:
-                        items.append({
-                            'path': path,
-                            'size': size,
-                            'mtime': datetime.fromtimestamp(mtime).isoformat(),
-                            'volume': vol})
-                        continue
-                    if args.path_only:
-                        items.append((path,))
-                        continue
-                    mtime = datetime.fromtimestamp(int(mtime))
-                    if args.iso8601:
-                        mtime = mtime.isoformat()
-                    elif mtime.year == year:
-                        mtime = mtime.strftime("%b %d %H:%M")
-                    else:
-                        mtime = mtime.strftime("%b %d %Y")
-                    items.append((path, size, mtime, vol))
+                backup.cur = cur = connect_db(dbfile, read_only=True)
+            sql = "SELECT path, size, time, storage_id FROM files"
+            where = []
+            sqlvars = []
+            if args.local and backup:
+                where.append("storage_id = ?")
+                sqlvars.append(backup.storage_id)
+            if args.filter:
+                where.append("(" + " OR ".join(f"(path GLOB ?)" for _ in args.filter) + ")")
+                sqlvars.extend(args.filter)
+            if args.volumes:
+                where.append("(" + " OR ".join(f"(storage_id LIKE ?)" for _ in args.volumes) + ")")
+                sqlvars.extend(f"{_}%" for _ in args.volumes)
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            if args.sort:
+                sort_map = {"path": "path", "size": "size", "mtime": "time", "volume": "storage_id"}
+                sort = sort_map[args.sort]
+            else:
+                sort = "path"
+            sql += f" ORDER BY {sort}"
+            if args.reverse:
+                sql += " DESC"
+            cur.execute(sql, sqlvars)
+            items = []
+            year = datetime.now().year
+            for path, size, mtime, vol in cur.fetchall():
                 if args.json:
-                    print(json.dumps(items))
+                    items.append({
+                        'path': path,
+                        'size': size,
+                        'mtime': datetime.fromtimestamp(mtime).isoformat(),
+                        'volume': vol})
+                    continue
+                if args.path_only:
+                    items.append((path,))
+                    continue
+                mtime = datetime.fromtimestamp(int(mtime))
+                if args.iso8601:
+                    mtime = mtime.isoformat()
+                elif mtime.year == year:
+                    mtime = mtime.strftime("%b %d %H:%M")
                 else:
-                    if  args.path_only:
-                        for _ in items:
-                            print(_)
-                    else:
-                        header = ["path", "size", "modified"] + (["volume"] if args.vol else [])
-                        simple_table(items, header=header)
-
+                    mtime = mtime.strftime("%b %d %Y")
+                items.append((path, size, mtime, vol))
+            if args.json:
+                print(json.dumps(items))
+            else:
+                if  args.path_only:
+                    for _ in items:
+                        print(_)
+                else:
+                    header = ["path", "size", "modified"] + (["volume"] if args.vol else [])
+                    simple_table(items, header=header)
+        except BackupException as _e:
+            logging.error(str(_e))
+            return False
         finally:
-            if sqldb:
-                sqldb.close()
+            if cur:
+                cur.connection.close()
             if backup:
                 backup.encrypt.stop()
 
