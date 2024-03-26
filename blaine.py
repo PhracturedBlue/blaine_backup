@@ -732,15 +732,19 @@ class Blaine:
         sqldb.close()
 
         # Now handle files
+        # The 'storage_db' should only contains files with its own storage_id, but just in case,
+        # we filter by storage_id to be sure.
+        # Copy all db entries related to the storage disk from the storage DB to the central DB.
         self.cur.execute("ATTACH ? AS storage_db", (storage_db,))
         self.cur.execute("DELETE FROM files WHERE storage_id = ?", (self.storage_id,))
         self.cur.execute("SELECT files.path, files.storage_id, a.storage_id FROM files "
                          "LEFT JOIN storage_db.files AS a ON files.path = a.path "
-                         "WHERE a.path IS NOT NULL")
+                         "WHERE a.path IS NOT NULL and a.storage_id = ?", (self.storage_id,))
         duplicates = self.cur.fetchall()
         for dup in duplicates:
             logging.warning("Found conflicting path %s: %s <=> %s", *dup)
-        self.cur.execute("INSERT OR IGNORE INTO files SELECT * FROM storage_db.files")
+        self.cur.execute("INSERT OR IGNORE INTO files SELECT * FROM storage_db.files "
+                         "WHERE storage_db.storage_id = ?", (self.storage_id,))
         self.cur.connection.commit()
         self.cur.execute("DETACH storage_db")
 
@@ -765,6 +769,8 @@ class Blaine:
         else:
             backup_db(storage_db)
         # If we get here, the db schema is synced (either done here, or in sync_storage_db())
+        # the storage_db will only contain entries related to its own files, and will
+        # never store any actions
         self.cur.execute("ATTACH ? AS storage_db", (storage_db,))
         self.cur.execute("DELETE FROM storage_db.files")
         self.cur.execute("INSERT INTO storage_db.files SELECT * FROM files WHERE storage_id = ?",
@@ -974,7 +980,7 @@ class Blaine:
         self.added += 1
         return needs_par2
 
-    def clean_storage(self, seen, paths):
+    def clean_storage(self, seen, paths, clean=True):
         """Delete any files on current storage that are no longer present"""
         remove = set()
         actions = []
@@ -985,6 +991,9 @@ class Blaine:
             if item.path in seen or not any(item.path.startswith(_) for _ in paths):
                 continue
             self.removed += 1
+            if not clean:
+                logging.warning("File %s no longer exists, but was not removed from the database", item.path)
+                continue
             if item.storage_id == self.storage_id:
                 self.path_unlink(item.path)
                 remove.add(item.path)
@@ -1206,11 +1215,7 @@ class Backup:
             args.paths = [os.path.abspath(_) for _ in args.paths]
             for basepath in args.paths:
                 cls.backup_path(backup, basepath, exclude, seen)
-            if args.clean:
-                backup.clean_storage(seen, args.paths)
-            else:
-                for path in sorted(seen):
-                    logging.warning("File %s no longer exists, but was not removed from the database", path)
+            backup.clean_storage(seen, args.paths, args.clean)
             backup.write_storage_db()
             ok_ = True
         except KeyboardInterrupt:
