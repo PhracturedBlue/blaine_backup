@@ -1129,7 +1129,7 @@ def parse_cmdline():
         parents=[common]
         )
     subparsers = parser.add_subparsers(required=True)
-    for subparser in (Backup, List):
+    for subparser in (Backup, List, Admin):
         subparser.add_parser(subparsers, common)
     args, remaining_argv = conf_parser.parse_known_args()
     if args.config_file:
@@ -1147,6 +1147,48 @@ def parse_cmdline():
     logging.debug("Running: %s", " ".join(_ if ' ' not in _ else f"'{_}'" for _ in sys.argv))
 
     return args
+
+@contextmanager
+def load_db(database, blaine_dir, dry_run, **blaine_args):
+    """Connect to the database and initialize Blaine()"""
+    cur = None
+    backup = None
+    if dry_run:
+        tmpdir = tempfile.TemporaryDirectory()
+        tmpdb = f"{tmpdir.name}/database.sqlite"
+    if os.path.exists(database):
+        if dry_run:
+            shutil.copyfile(database, tmpdb)
+            cur = connect_db(tmpdb)
+        else:
+            backup_db(database)
+            cur = connect_db(database)
+    try:
+        backup = Blaine(cur, blaine_dir, dry_run=dry_run, **blaine_args)
+        if not cur:
+            dbfile = backup.get_storage_db_file()
+            if os.path.exists(dbfile):
+                logging.warning("Did not find database %s.  Using database from backup", database)
+                if dry_run:
+                    shutil.copyfile(dbfile, tmpdb)
+                else:
+                    shutil.copyfile(dbfile, database)
+            if not dry_run:
+                backup_db(database)
+                backup.cur = cur = connect_db(database)
+            else:
+                backup.cur = cur = connect_db(tmpdb)
+        yield cur, backup
+    except (BackupException, EncryptionException) as _e:
+        logging.error(_e)
+        raise
+    finally:
+        if cur:
+            cur.connection.commit()
+            cur.connection.close()
+        if backup:
+            backup.storage_added += backup.par2q.join()
+            backup.encrypt.stop()
 
 class Backup:
     """backup subcommand"""
@@ -1175,63 +1217,29 @@ class Backup:
     @classmethod
     def run(cls, args):
         exclude = parse_exclude(args)
-        cur = None
-        tmpdir = None
-        if args.dry_run:
-            tmpdir = tempfile.TemporaryDirectory()
-            tmpdb = f"{tmpdir.name}/database.sqlite"
-        if os.path.exists(args.database):
-            if args.dry_run:
-                shutil.copyfile(args.database, tmpdb)
-                cur = connect_db(tmpdb)
-            else:
-                backup_db(args.database)
-                cur = connect_db(args.database)
-        backup = None
         ok_ = False
-        try:
-            backup = Blaine(cur, args.blaine_dir, mode = cls.map_mode(args.match_mode), init=args.init,
-                            encrypt=args.encrypt,
-                            par2_threads=args.par2_threads, par2_threshold=args.par2_threshold,
-                            dry_run=args.dry_run)
-            if not cur:
-                dbfile = backup.get_storage_db_file()
-                if os.path.exists(dbfile):
-                    logging.warning("Did not find database %s.  Using database from backup", args.database)
-                    if args.dry_run:
-                        shutil.copyfile(dbfile, tmpdb)
-                    else:
-                        shutil.copyfile(dbfile, args.database)
-                if not args.dry_run:
-                    backup_db(args.database)
-                    backup.cur = cur = connect_db(args.database)
-                else:
-                    backup.cur = cur = connect_db(tmpdb)
-            schema = get_schema(cur)
-            if schema != SCHEMA:
-                upgrade_schema(cur, schema)
-            backup.sync_storage_db()
-            seen = set()
-            args.paths = [os.path.abspath(_) for _ in args.paths]
-            for basepath in args.paths:
-                cls.backup_path(backup, basepath, exclude, seen)
-            backup.clean_storage(seen, args.paths, args.clean)
-            backup.write_storage_db()
-            ok_ = True
-        except KeyboardInterrupt:
-            backup.write_storage_db()
-        except DiskFullException as _e:
-            logging.error(_e)
-        except (BackupException, EncryptionException) as _e:
-            logging.error(_e)
-            raise
-        finally:
-            if cur:
-                cur.connection.commit()
-                cur.connection.close()
-            if backup:
-                backup.storage_added += backup.par2q.join()
-                backup.encrypt.stop()
+        backup = None
+        with load_db(args.database, args.blaine_dir, args.dry_run,
+                 mode=cls.map_mode(args.match_mode), init=args.init,
+                 encrypt=args.encrypt,
+                 par2_threads=args.par2_threads, par2_threshold=args.par2_threshold,
+                 ) as (cur, backup):
+            try:
+                schema = get_schema(cur)
+                if schema != SCHEMA:
+                    upgrade_schema(cur, schema)
+                backup.sync_storage_db()
+                seen = set()
+                args.paths = [os.path.abspath(_) for _ in args.paths]
+                for basepath in args.paths:
+                    cls.backup_path(backup, basepath, exclude, seen)
+                backup.clean_storage(seen, args.paths, args.clean)
+                backup.write_storage_db()
+                ok_ = True
+            except KeyboardInterrupt:
+                backup.write_storage_db()
+            except DiskFullException as _e:
+                logging.error(_e)
         if backup:
             backup.show_summary()
         return ok_
@@ -1313,10 +1321,10 @@ class List:
                 where.append("storage_id = ?")
                 sqlvars.append(backup.storage_id)
             if args.filter:
-                where.append("(" + " OR ".join(f"(path GLOB ?)" for _ in args.filter) + ")")
+                where.append("(" + " OR ".join("(path GLOB ?)" for _ in args.filter) + ")")
                 sqlvars.extend(args.filter)
             if args.volumes:
-                where.append("(" + " OR ".join(f"(storage_id LIKE ?)" for _ in args.volumes) + ")")
+                where.append("(" + " OR ".join("(storage_id LIKE ?)" for _ in args.volumes) + ")")
                 sqlvars.extend(f"{_}%" for _ in args.volumes)
             if where:
                 sql += " WHERE " + " AND ".join(where)
@@ -1359,6 +1367,7 @@ class List:
                 else:
                     header = ["path", "size", "modified"] + (["volume"] if args.vol else [])
                     simple_table(items, header=header)
+            return True
         except BackupException as _e:
             logging.error(str(_e))
             return False
@@ -1367,6 +1376,73 @@ class List:
                 cur.connection.close()
             if backup:
                 backup.encrypt.stop()
+
+class Admin:
+    """Admin subcommand"""
+    @classmethod
+    def add_parser(cls, parser, common):
+        p_admin = parser.add_parser("admin", parents=[common], help="Admin commands")
+        p_admin.set_defaults(func=cls.run)
+        p_admin.add_argument("--remove_disk", help="Remove disk from database")
+        p_admin.add_argument("--remove_files", nargs="+", default=[], help="Remove files from archive")
+        p_admin.add_argument("--list_disks", action="store_true", help="List known disks")
+        p_admin.add_argument("--list_pending", nargs="*", help="List pending actions (opt: for selected disks)")
+        p_admin.add_argument("--apply_pending", action="store_true", help="Apply pending actions to the current storage disk")
+        p_admin.add_argument("--dry_run", action="store_true", help="Don't apply any changes")
+        p_admin.add_argument("--database", "--db", required=True, help="path to database")
+        p_admin.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
+
+    @staticmethod
+    def run(args):
+        with load_db(args.database, args.blaine_dir, args.dry_run,
+                     encrypt=args.encrypt) as (cur, backup):
+            try:
+                if args.list_disks:
+                    for storage_id, in cur.execute("SELECT DISTINCT storage_id FROM files"):
+                        if storage_id == backup.storage_id:
+                            print(f"{storage_id} *")
+                        else:
+                            print(storage_id)
+                    return False
+                if args.list_pending is not None:
+                    for action, path, target, storage_id in cur.execute("SELECT action, path, target_path, storage_id FROM actions"):
+                        if not args.list_pending  or any(storage_id.startswith(_) for _ in args.list_pending):
+                            if action in ("RENAME" or "LINK"):
+                                print(f"{action} {path} to {target} on disk {storage_id}")
+                            elif action in ("DELETE",):
+                                print(f"{action} {path} on disk {storage_id}")
+                            else:
+                                print(f"Unknown Action {action} {path} {target} for disk {storage_id}")
+                    return True
+                if not any((args.apply_pending, args.remove_disk, args.remove_files)):
+                    logging.error("No admin action specified")
+                    return False 
+
+                schema = get_schema(cur)
+                if schema != SCHEMA:
+                    upgrade_schema(cur, schema)
+                backup.sync_storage_db()
+
+                if args.apply_pending:
+                    return True
+                if args.remove_disk:
+                    file_count = cur.execute("SELECT count(*) FROM files WHERE storage_id = ?", (args.remove_disk,)).fetchone()
+                    action_count = cur.execute("SELECT count(*) FROM actions WHERE storage_id = ?", (args.remove_disk,)).fetchone()
+                    cur.execute("DELETE FROM files WHERE storage_id = ?", (args.remove_disk,))
+                    cur.execute("DELETE FROM actions WHERE storage_id = ?", (args.remove_disk,))
+                    logging.info("Removed disk %s.  %d fioles, %d pending actions", args.remove_disk, file_count, action_count)
+                    return True
+                if args.remove_files:
+                    for path, storage_id in cur.execute("SELECT path, storage_id FROM files WHERE path GLOB ?"):
+                        if storage_id != backup.storage_id:
+                            backup.log("DELAY_DELETE", path)
+                            backup.append_action("DELETE", storage_id, path)
+                        else:
+                            backup.path_unlink(path)
+                    return True
+            except KeyboardInterrupt:
+                backup.write_storage_db()
+            return False
 
 
 def main():
