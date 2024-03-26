@@ -41,7 +41,7 @@ RUN addgroup --gid $GID debian && adduser --system --uid $UID --gid 1000 debian
 
 ARG TEST
 RUN apt-get update -y && \
-    apt-get install -y dc3dd sqlite3 fuse securefs python3 libgomp1\
+    apt-get install -y dc3dd sqlite3 fuse securefs python3 libgomp1 rsync\
     $(if false; then echo par2; fi) \
     $(if [ "$TEST" != "" ]; then echo python3-pip; fi) \
     build-essential && \

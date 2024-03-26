@@ -744,7 +744,7 @@ class Blaine:
         for dup in duplicates:
             logging.warning("Found conflicting path %s: %s <=> %s", *dup)
         self.cur.execute("INSERT OR IGNORE INTO files SELECT * FROM storage_db.files "
-                         "WHERE storage_db.storage_id = ?", (self.storage_id,))
+                         "WHERE storage_db.files.storage_id = ?", (self.storage_id,))
         self.cur.connection.commit()
         self.cur.execute("DETACH storage_db")
 

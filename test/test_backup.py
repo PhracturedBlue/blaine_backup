@@ -7,7 +7,9 @@ import shutil
 import tempfile
 import uuid
 import sqlite3
+import subprocess
 from contextlib import contextmanager
+from collections import namedtuple
 
 import pytest
 
@@ -29,7 +31,7 @@ STORAGE_DIRS = [
 ]
 INODE_MAP = {'last': 1000}
     
-@pytest.fixture(scope='module', autouse=True)
+@pytest.fixture(scope='function', autouse=True)
 def setup_archive():
     for storage in STORAGE_DIRS:
         if storage['PATH'] == None:
@@ -41,6 +43,7 @@ def setup_archive():
     yield
     for obj in STORAGE_DIRS:
         del obj['TDOBJ']
+        obj['PATH'] = None
 
 def prepare_stage(stage_num, clean=False):
     """Ensure hardlinks are created since git can't store them"""
@@ -107,7 +110,7 @@ def do_encrypt(encryption_key, storage_dir):
         enc.stop()
 
 def verify_db(db_file, expected_file, storage_id=None):
-    """Verify that the database matches the exected state"""
+    """Verify that the database matches the expected state"""
     def dict_factory(cursor, row):
         d = {}
         for idx, col in enumerate(cursor.description):
@@ -186,9 +189,11 @@ def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
             if not encrypt:
                 # encryption masks hardlinks
                 if sha1 in shamap:
-                    assert os.lstat(arc_path).st_ino == shamap[sha1]
+                    if blaine.blaine_lstat(arc_path).st_ino != shamap[sha1]:
+                        breakpoint()
+                    assert blaine.blaine_lstat(arc_path).st_ino == shamap[sha1]
                 else:
-                    shamap[sha1] = os.lstat(arc_path).st_ino
+                    shamap[sha1] = blaine.blaine_lstat(arc_path).st_ino
     for obj in fileobjs:
         if obj['path'] not in seen:
             breakpoint()
@@ -202,7 +207,9 @@ def verify_data(data_dir, db_file, exclude_file):
     cur.execute("SELECT * from files ORDER BY path ASC")
     fileobjs = cur.fetchall()
     con.close()
-    exclude_dirs, exclude_files = blaine.parse_exclude(exclude_file)
+    args_nt = namedtuple("Args", ["snapraid_conf", "exclude", "re_exclude"])
+    args = args_nt(exclude_file, [], [])
+    exclude_dirs, exclude_files = blaine.parse_exclude(args)
     seen = set()
     for root, dirs, files in os.walk(data_dir):
         filtered_dirs = []
@@ -228,7 +235,7 @@ def verify_data(data_dir, db_file, exclude_file):
                 with open(path, "rb") as _fh:
                     sha1 = hashlib.sha1(_fh.read()).hexdigest()
             assert val['sha1'] == sha1, f"{path} SHA1 mismatch"
-            assert os.lstat(path).st_ino == val['inode']
+            assert blaine.blaine_lstat(path).st_ino == val['inode']
     for obj in fileobjs:
         assert obj['path'] in seen
 
@@ -236,7 +243,7 @@ def dump_dir_stats(dirname):
     for root, dirs, files in os.walk(dirname):
         for fname in files:
             path = os.path.join(root, fname)
-            lstat = os.lstat(path)
+            lstat = blaine.blaine_lstat(path)
             with open(path, "rb") as _fh:
                 sha1 = hashlib.sha1(_fh.read()).hexdigest()
             print(f"{path}: {lstat.st_ino} {lstat.st_size} {sha1}")
@@ -249,7 +256,7 @@ def dump_dir_stats(dirname):
 #    dump_dir_stats(STORAGE_DIRS[0]['PATH'])
 #    assert True
 
-def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None):
+def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None, prepare=True, expected_file=None):
     class Config(blaine.Config):
          pass
 
@@ -257,11 +264,13 @@ def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None):
     def logger(self, cmd, *path):
         history.append((cmd, *path))
 
-    prepare_stage(stage, clean=(stage==1))
+    if prepare:
+        prepare_stage(stage, clean=(stage==1))
     archive_dir = STORAGE_DIRS[archive]['PATH']
     db_file = os.path.join(STORAGE_DIRS[0]['PATH'], "archive.sqlite3")
     data_dir = os.path.join(STORAGE_DIRS[0]['PATH'], "archive")
-    expected_file = os.path.join(DATA_DIR, f"stage{ stage }_db.json")
+    if not expected_file:
+        expected_file = os.path.join(DATA_DIR, f"stage{ stage }_db.json")
     monkeypatch.setattr("blaine.Config", Config)  # Don't overwrite defaults
     monkeypatch.setattr("blaine.Blaine.logger", logger)
     monkeypatch.setattr("sys.argv", ["app", "backup", "--db", db_file,
@@ -280,11 +289,21 @@ def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None):
         verify_archive(storage_dir, expected_file, STORAGE_DIRS[archive]['ID'], encrypt)
         verify_db(os.path.join(storage_dir, ".backup_db.sqlite3"),
               expected_file, STORAGE_DIRS[archive]['ID'])
+    return history
 
 def test_stage123_archive(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 1, 1)
     run_stage(monkeypatch, caplog, 2, 2)
     run_stage(monkeypatch, caplog, 3, 1)
+
+def test_dupdisk(monkeypatch, caplog):
+    run_stage(monkeypatch, caplog, 1, 1)
+    # need rsync instead of shutil.copytree to preserve hardlinks
+    subprocess.run(["rsync", "-aH", STORAGE_DIRS[1]['PATH'] + "/", STORAGE_DIRS[3]['PATH']], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    h1 = run_stage(monkeypatch, caplog, 2, 1, expected_file=f"{DATA_DIR}/stage2_dup1_db.json")
+    h2 = run_stage(monkeypatch, caplog, 2, 3, prepare=False, expected_file=f"{DATA_DIR}/stage2_dup2_db.json")
+    res = subprocess.run(["diff", "-r", STORAGE_DIRS[1]['PATH'], STORAGE_DIRS[3]['PATH']], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert not res.returncode
 
 def test_stage123_encrypted(monkeypatch, caplog):
     run_stage(monkeypatch, caplog, 1, 3, encrypt="abcd1234")

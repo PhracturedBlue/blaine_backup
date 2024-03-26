@@ -110,7 +110,9 @@ To run in Docker:
 Tests are designed to be run in a Docker container for reproducibility:
 
     docker build --tag blainebackup:test --build-arg TEST=1 .
-    docker run --rm -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v $PWD:/work pytest --cov=blaine --cov-report term-missing -vv test
+    docker run --rm -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v $PWD:/work blainebackup:latest pytest --cov=blaine --cov-report term-missing -vv test
+    An equivalent podman command would look like:
+    podman run --rm -it --userns=keep-id --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined -v $PWD:/work blainebackup:latest pytest --cov=blaine --cov-report term-missing -vv test
 
 ## Other considerations
 
