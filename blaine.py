@@ -45,10 +45,12 @@
 # 4: Same path is in db size mismatch
 # 4.a: Storage Id is same as current: update in db, replace on storage disk
 # 4.b: Storage Id is different: update in db, copy to storage disk, add delete action
-# 5: Path is not in db: add to db, copy to storage disk
-# 5.a: hash/size is in db:
-# 5.a.1: Storage Id is same as current: remove on disk, add hardlink on disk
-# 5.a.2: Storage Id is different: remove on disk, add hardlink action
+# 5: Path is not in db, but found a unique match based on size/mtime/data_mount
+#    Handle identically to #2
+# 6: Path is not in db: add to db, copy to storage disk
+# 6.a: hash/size is in db:
+# 6.a.1: Storage Id is same as current: remove on disk, add hardlink on disk
+# 6.a.2: Storage Id is different: remove on disk, add hardlink action
 
 # Cleanup rules
 # 1: Path only in db:
@@ -102,6 +104,9 @@ class Config:
     STORAGE_BACKUP_ID = ".backup_id"
     STORAGE_BACKUP_ENC = ".encrypt"
     STORAGE_BACKUP_DEC = "data"
+
+ALLOW_MATCH_BY_PATH_MTIME_SIZE = 0x01
+ALLOW_MATCH_BY_MTIME_SIZE = 0x03
 
 FileObj = namedtuple("FileObj", ["path", "inode", "sha1", "time", "size", "storage_id"])
 LStat = namedtuple("LStat", ["st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime"])
@@ -441,7 +446,7 @@ def get_storage_free(storage_root):
 class Blaine:
     """Execute a backup"""
     # pylint: disable = too-many-instance-attributes too-many-arguments
-    def __init__(self, cur, storage_dir, init=False, reserved_space=None, parity_pct=None, encrypt=None,
+    def __init__(self, cur, storage_dir, mode=None, init=False, reserved_space=None, parity_pct=None, encrypt=None,
                  par2_threads=None, par2_threshold=10_000_000, dry_run=False, logger=None):
         """Initialize"""
         self.skipped = 0
@@ -450,6 +455,7 @@ class Blaine:
         self.modified = 0
         self.cur = cur
         self.dry_run = dry_run
+        self.mode = mode
         self.log = logger or self.logger
         self.encrypt = Encrypt(storage_dir, encrypt, read_only=dry_run)
         self.par2q = Par2Queue(par2_threads, par2_threshold)
@@ -483,6 +489,8 @@ class Blaine:
             "HARDLINK": "Hardlinking",
             "COPY": "Copying",
             "SYMLINK": "Symlinking",
+            "UPDATE_DB_INODE": "Updating inode in DB for",
+            "UPDATE_DB_SHA": "Updating SHA in DB for",
             "PAR2": "Creating par files for",
             }
         if path2:
@@ -744,6 +752,8 @@ class Blaine:
         """Write the relevant files data for the current storage disk to the storage-local db"""
         storage_db = self.get_storage_db_file()
         logging.debug("Writing updated storage for %s (%s)", self.storage_id, storage_db)
+        if self.dry_run:
+            return
         if not os.path.exists(storage_db):
             sqldb = sqlite3.connect(storage_db,
                                     detect_types=sqlite3.PARSE_DECLTYPES)
@@ -761,6 +771,84 @@ class Blaine:
                          (self.storage_id,))
         self.cur.connection.commit()
         self.cur.execute("DETACH storage_db")
+
+    def match_item_by_props(self, path, lstat, match, item):
+        """Section 2 and Section 5"""
+        if not os.path.lexists(match.path):
+            # 2.a rename
+            if not item:
+                # 2.a.1: Destination does not exist in db
+                if match.storage_id == self.storage_id:
+                    # 2.a.1.a: Rename on disk
+                    self.path_rename(match.path, path)
+                    self.update_db(match, match.path, lstat, newpath=path)
+                else:
+                    # 2.a.1.b: Rename in db
+                    self.log("DELAY_RENAME", match.path, path)
+                    self.append_action("RENAME", match.storage_id, match.path, path)
+                    self.update_db(match, match.path, lstat, newpath=path)
+            else:
+                # 2.a.2: Destination already exists in db
+                if match.sha1 == item.sha1:
+                    # 2.a.2.a: inode changed, but no data change
+                    self.log("RENAME", match.path, path)
+                    self.update_db(item, path, lstat)
+                    self.remove_db(match.path)
+                    if match.storage_id != self.storage_id:
+                        self.log("DELAY_DELETE", match.path)
+                        self.append_action("DELETE", match.storage_id, match.path)
+                    else:
+                        self.path_unlink(match.path)
+                else:
+                    if item.storage_id == self.storage_id:
+                        # 2.a.2.b: sha1 mismatch, same storage device
+                        self.path_unlink(path, lstat)
+                        self.path_rename(match.path, path)
+                        self.remove_db(path)
+                        self.update_db(match, match.path, lstat, newpath=path)
+                    else:
+                        # 2.a.2.c: sha1 mismatch, different storage device
+                        self.log("DELAY_RENAME", match.path, path)
+                        self.append_action("DELETE", item.storage_id, path)
+                        self.remove_db(path)
+                        self.update_db(match, match.path, lstat, newpath=path)
+                        self.append_action("RENAME", item.storage_id, match.path, path)
+            self.modified += 1
+            return False
+        # original path still exists
+        if not item:
+            # 2.b.1: Destination path does not exist
+            if match.storage_id == self.storage_id:
+                # 2.b.1.a: hardlink on disk
+                self.path_hardlink(match.path, path)
+                self.add_db(path, lstat, match.sha1)
+            else:
+                # 2.b.1.b: hardlink in db
+                self.log("DELAY_HARDLINK", match.path, path)
+                self.append_action("LINK", match.storage_id, match.path, path)
+                self.add_db(path, lstat, match.sha1, match.storage_id)
+        else:
+            # 2.b.2: Destination path DOES exist
+            if match.sha1 == item.sha1:
+                # 2.b.2.a: inode changed, but no data change
+                self.log("UPDATE_DB_INODE", path)
+                self.update_db(item, path, lstat)
+            else:
+                if match.storage_id == self.storage_id:
+                    # 2.b.2.b: Mismatch sha1, storage Id is same as current
+                    if item.storage_id != self.storage_id:
+                        self.append_action("DELETE", item.storage_id, path)
+                    self.path_unlink(path, lstat)
+                    self.path_hardlink(match.path, path)
+                    self.update_db(match, path, lstat)
+                else:
+                    # 2.b.2.c: Mismatch sha1, storage Id is different
+                    self.log("DELAY_HARDLINK", match.path, path)
+                    self.append_action("DELETE", item.storage_id, path)
+                    self.update_db(match, path, lstat)
+                    self.append_action("LINK", item.storage_id, match.path, path)
+        self.modified += 1
+        return False
 
     def handle_path(self, path):
         """Take needed action for a given file path"""
@@ -806,84 +894,29 @@ class Blaine:
         item = self.cur.fetchone()
         if item:
             item = FileObj(*item)
-        if match:  # 'match' contains an item wth a different name but same inode & size
-            if not os.path.lexists(match.path):
-                # 2.a rename
-                if not item:
-                    # 2.a.1: Destination does not exist in db
-                    if match.storage_id == self.storage_id:
-                        # 2.a.1.a: Rename on disk
-                        self.path_rename(match.path, path)
-                        self.update_db(match, match.path, lstat, newpath=path)
-                    else:
-                        # 2.a.1.b: Rename in db
-                        self.append_action("RENAME", match.storage_id, match.path, path)
-                        self.update_db(match, match.path, lstat, newpath=path)
-                else:
-                    # 2.a.2: Destination already exists in db
-                    if match.sha1 == item.sha1:
-                        # 2.a.2.a: inode changed, but no data change
-                        self.update_db(item, path, lstat)
-                        self.remove_db(match.path)
-                        if match.storage_id != self.storage_id:
-                            self.append_action("DELETE", match.storage_id, match.path)
-                    else:
-                        if item.storage_id == self.storage_id:
-                            # 2.a.2.b: sha1 mismatch, same storage device
-                            self.path_unlink(path, lstat)
-                            self.path_rename(match.path, path)
-                            self.remove_db(path)
-                            self.update_db(match, match.path, lstat, newpath=path)
-                        else:
-                            # 2.a.2.c: sha1 mismatch, different storage device
-                            self.append_action("DELETE", item.storage_id, path)
-                            self.remove_db(path)
-                            self.update_db(match, match.path, lstat, newpath=path)
-                            self.append_action("RENAME", item.storage_id, match.path, path)
-                self.modified += 1
-                return False
-            # original path still exists
-            if not item:
-                # 2.b.1: Destination path does not exist
-                if match.storage_id == self.storage_id:
-                    # 2.b.1.a: hardlink on disk
-                    self.path_hardlink(match.path, path)
-                    self.add_db(path, lstat, match.sha1)
-                else:
-                    # 2.b.1.b: hardlink in db
-                    self.append_action("LINK", match.storage_id, match.path, path)
-                    self.add_db(path, lstat, match.sha1, match.storage_id)
-            else:
-                # 2.b.2: Destination path DOES exist
-                if match.sha1 == item.sha1:
-                    # 2.b.2.a: inode changed, but no data change
-                    self.update_db(item, path, lstat)
-                else:
-                    if match.storage_id == self.storage_id:
-                        # 2.b.2.b: Mismatch sha1, storage Id is same as current
-                        if item.storage_id != self.storage_id:
-                            self.append_action("DELETE", item.storage_id, path)
-                        self.path_unlink(path, lstat)
-                        self.path_hardlink(match.path, path)
-                        self.update_db(match, path, lstat)
-                    else:
-                        # 2.b.2.c: Mismatch sha1, storage Id is different
-                        self.append_action("DELETE", item.storage_id, path)
-                        self.update_db(match, path, lstat)
-                        self.append_action("LINK", item.storage_id, match.path, path)
-            self.modified += 1
-            return False
+        if match:  # Section 2: 'match' contains an item wth a different name but same inode & size
+            res = self.match_item_by_props(path, lstat, match, item)
+            if res is not None:
+                return res
         # match is none
         if item:
             if not is_symlink:
                 if item.size == lstat.st_size:
+                    if self.mode & ALLOW_MATCH_BY_PATH_MTIME_SIZE and item.time == lstat.st_mtime:
+                        # 3.a: assumed hash match
+                        self.log("UPDATE_DB_INODE", path)
+                        self.update_db(item, path, lstat)
+                        self.modified += 1
+                        return False
                     sha1 = calc_hash(path)
                     if sha1 == item.sha1:
                         # 3.a: hash match
+                        self.log("UPDATE_DB_INODE", path)
                         self.update_db(item, path, lstat)
                         self.modified += 1
                         return False
             # if item.size != lstat.st_size or item.sha1 != sha1
+            self.log("UPDATE_DB_SHA", path)
             if item.storage_id == self.storage_id:
                 # 3.b.1 or 4.a: Modified file
                 sha1 = self.path_copy(path, lstat)
@@ -895,7 +928,20 @@ class Blaine:
                 self.append_action("DELETE", item.storage_id, path)
             self.modified += 1
             return needs_par2
-        # 5: Path is not in db
+        if self.mode & ALLOW_MATCH_BY_MTIME_SIZE:
+            try:
+                self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files WHERE time = ? and size = ? and path LIKE ?",
+                                 (lstat.st_mtime, lstat.st_size, self.data_mount + '%'))
+            except Exception as _e:
+                breakpoint()
+                raise
+            matches = [FileObj(*_) for _ in self.cur.fetchall()]
+            if len(matches) == 1:
+                # 5: Found a unique size/mtime match on the same data_mount.  This is basiclal the same as section 2
+                res = self.match_item_by_props(path, lstat, matches[0], None)
+                if res is not None:
+                    return res
+        # 6: Path is not in db
         sha1 = self.path_copy(path, lstat)
         self.add_db(path, lstat, sha1)
         self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files "
@@ -904,13 +950,23 @@ class Blaine:
         if matches:
             match = next((_ for _ in matches if _.storage_id == self.storage_id), None)
             if match:
-                # 5.a.1:
-                os.unlink(self.storage_path(path))
-                self.path_hardlink(match.path, path)
+                # 6.a.1:
+                if self.dry_run:
+                    self.log("HARDLINK", match.path, path)
+                else:
+                    try:
+                        os.unlink(self.storage_path(path))
+                    except OSError:
+                        pass
+                    self.path_hardlink(match.path, path)
                 self.update_db(match, path, lstat)
             else:
-                # 5.a.2:
-                os.unlink(self.storage_path(path))
+                # 6.a.2:
+                if not self.dry_run:
+                    try:
+                        os.unlink(self.storage_path(path))
+                    except OSError:
+                        pass
                 self.update_db(matches[0], path, lstat)
                 self.append_action("LINK", matches[0].storage_id, matches[0].path, path)
             self.modified += 1
@@ -980,26 +1036,41 @@ def connect_db(db_file, read_only=False):
                             detect_types=sqlite3.PARSE_DECLTYPES)
     return sqldb.cursor()
 
-def parse_exclude(exclusion_file):
+def parse_exclude(args):
     """Generate exclusion list in RE format"""
     exclude_dirs = []
     exclude_files = []
-    if exclusion_file:
-        with open(exclusion_file) as _fh:
+    if args.snapraid_conf:
+        with open(args.snapraid_conf) as _fh:
             for line in _fh.readlines():
                 if line.startswith("exclude"):
                     pattern = line.strip().split(None, 1)[-1]
                     if pattern[-1] == '/':
                         res = fnmatch.translate(pattern[:-1])
-                        logging.debug("Adding exclusion for: %s", res)
                         exclude_dirs.append(re.compile(res))
                     else:
                         res = fnmatch.translate(pattern)
-                        logging.debug("Adding exclusion for: %s", res)
                         exclude_files.append(re.compile(res))
-    return (exclude_dirs, exclude_files)
+                    logging.debug("Adding exclusion for: %s", res)
 
-def parse_config(configfile, remaining_argv, parser):
+    for item in args.exclude:
+        if item[-1] == '/':
+            res = fnmatch.translate(item[:-1])
+            exclude_dirs.append(re.compile(res))
+        else:
+            res = fnmatch.translate(item)
+            exclude_files.append(re.compile(res))
+        logging.debug("Adding exclusion for: %s", res)
+
+    for item in args.re_exclude:
+        logging.debug("Adding exclusion for: %s", item)
+        if item[-1] == '/':
+            exclude_dirs.append(re.compile(item[:-1]))
+        else:
+            exclude_files.append(re.compile(item))
+    return exclude_dirs, exclude_files
+
+def parse_config(configfile, parser):
     """Parse config file"""
     parser_args = {}
     defaults = {}
@@ -1053,7 +1124,7 @@ def parse_cmdline():
         subparser.add_parser(subparsers, common)
     args, remaining_argv = conf_parser.parse_known_args()
     if args.config_file:
-        parse_config(args.config_file, remaining_argv, parser)
+        parse_config(args.config_file, parser)
     args = parser.parse_args(remaining_argv)
     handlers = [logging.StreamHandler()]
     if args.logfile:
@@ -1076,6 +1147,8 @@ class Backup:
         p_backup.set_defaults(func=cls.run)
         p_backup.add_argument('paths', metavar='PATH', nargs='+', help='Paths to archive')
         p_backup.add_argument("--snapraid_conf", help="Snapraid config file (used for automatic file exclusions)")
+        p_backup.add_argument("--exclude", nargs="+", default=[], help="Paths to exclude using glob syntax")
+        p_backup.add_argument("--re_exclude", nargs="+", default=[], help="Paths to exclude using regex syntax")
         p_backup.add_argument("--database", "--db", required=True, help="path to database")
         p_backup.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
         p_backup.add_argument("--init", action="store_true", help="Initialize new storage disk")
@@ -1085,12 +1158,14 @@ class Backup:
         p_backup.add_argument("--par2_threshold", default=10_000_000, type=int,
                             help="Files larger than this use a single multi-threaded par2 call instead"
                                  " of using multiple single-threaded par2 calls")
+        p_backup.add_argument("--match-mode", choices=["inode","path_size_mtime", "size_mtime"], default="inode",
+                              help="Select an alternate matching mode")
         p_backup.add_argument("--clean", dest='clean', action='store_true',
                             help="Remove files from backup-storage that no longer exist in the data-set")
 
     @classmethod
     def run(cls, args):
-        exclude = parse_exclude(args.snapraid_conf)
+        exclude = parse_exclude(args)
         cur = None
         tmpdir = None
         if args.dry_run:
@@ -1098,7 +1173,7 @@ class Backup:
             tmpdb = f"{tmpdir.name}/database.sqlite"
         if os.path.exists(args.database):
             if args.dry_run:
-                shutils.copyfile(args.database, tmpdb)
+                shutil.copyfile(args.database, tmpdb)
                 cur = connect_db(tmpdb)
             else:
                 backup_db(args.database)
@@ -1106,7 +1181,8 @@ class Backup:
         backup = None
         ok_ = False
         try:
-            backup = Blaine(cur, args.blaine_dir, init=args.init, encrypt=args.encrypt,
+            backup = Blaine(cur, args.blaine_dir, mode = cls.map_mode(args.match_mode), init=args.init,
+                            encrypt=args.encrypt,
                             par2_threads=args.par2_threads, par2_threshold=args.par2_threshold,
                             dry_run=args.dry_run)
             if not cur:
@@ -1154,6 +1230,16 @@ class Backup:
         if backup:
             backup.show_summary()
         return ok_
+
+    @staticmethod
+    def map_mode(mode):
+        if mode == "path_size_mtime":
+            return ALLOW_MATCH_BY_PATH_MTIME_SIZE
+        if mode == "size_mtime":
+            return ALLOW_MATCH_BY_MTIME_SIZE
+        if mode == "inode":
+            return 0
+        raise ValueError(f"Unsupported match-mode:{mode}")
 
     @staticmethod
     def backup_path(backup, basepath, exclude, seen):
