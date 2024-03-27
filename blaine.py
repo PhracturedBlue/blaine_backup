@@ -175,7 +175,7 @@ class Encrypt:
         """Execute encryption in a background process"""
         try:
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
+                           stderr=subprocess.DEVNULL, preexec_fn=os.setpgrp)
         except Exception:
             os.kill(pid, signal.SIGURG)
 
@@ -231,11 +231,13 @@ class Encrypt:
             encrypt_mount = Config.ENCRYPT_MOUNT_RO if self.read_only else Config.ENCRYPT_MOUNT
             mount_cmd = self.apply_enc_vars(encrypt_mount, keyfile, encrypt_dir, decrypt_dir)
             logging.debug("Mounting encrypted dir: %s", " ".join(mount_cmd))
+            original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
             self.enc_proc = multiprocessing.Process(
                 target=self._start_encryption,
                 args=(os.getpid(), mount_cmd))
             self.enc_proc.daemon = True
             self.enc_proc.start()
+            signal.signal(signal.SIGINT, original_sigint_handler)
             retry = 30
             while retry and not os.path.ismount(decrypt_dir):
                 time.sleep(0.2)
@@ -512,6 +514,7 @@ class Blaine:
         if self.dry_run:
             return
         try:
+            os.makedirs(os.path.dirname(newpath), exist_ok=True)
             os.rename(origpath, newpath)
             if os.path.exists(origpath + ".par2"):
                 os.rename(origpath + ".par2", newpath + ".par2")
@@ -877,6 +880,8 @@ class Blaine:
                 self.cur.execute(
                     f"SELECT { ', '.join(FileObj._fields) } FROM files "
                     "WHERE inode = ? AND path LIKE ?", (lstat.st_ino, self.data_mount + '%'))
+            except KeyboardInterrupt:
+                raise
             except:
                 breakpoint()
                 raise
@@ -1387,7 +1392,7 @@ class Admin:
         p_admin.add_argument("--remove_files", nargs="+", default=[], help="Remove files from archive")
         p_admin.add_argument("--list_disks", action="store_true", help="List known disks")
         p_admin.add_argument("--list_pending", nargs="*", help="List pending actions (opt: for selected disks)")
-        p_admin.add_argument("--apply_pending", action="store_true", help="Apply pending actions to the current storage disk")
+        p_admin.add_argument("--apply_pending", "--merge_disks", action="store_true", help="Apply pending actions to the current storage disk")
         p_admin.add_argument("--dry_run", action="store_true", help="Don't apply any changes")
         p_admin.add_argument("--database", "--db", required=True, help="path to database")
         p_admin.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
