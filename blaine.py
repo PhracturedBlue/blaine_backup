@@ -100,7 +100,8 @@ class Config:
     ENCRYPT_MOUNT = ("gocryptfs -fg --passfile :KEYFILE: :ENCRYPT_DIR: :STORAGE_ROOT:")
     ENCRYPT_MOUNT_RO = ("gocryptfs -fg -ro --passfile :KEYFILE: :ENCRYPT_DIR: :STORAGE_ROOT:")
     ENCRYPT_UNMOUNT = "fusermount -u :STORAGE_ROOT:"
-    STORAGE_BACKUP_DB = ".backup_db.sqlite3"
+    STORAGE_BACKUP_DB = ".blaine_db.sqlite3"
+    STORAGE_BACKUP_DB_OLD = ".blaine_db.old"
     STORAGE_BACKUP_ID = ".backup_id"
     STORAGE_BACKUP_ENC = ".encrypt"
     STORAGE_BACKUP_DEC = "data"
@@ -1011,6 +1012,101 @@ class Blaine:
         for action in actions:
             self.append_action(*action)
 
+    def compare_mtime(self, mtime, item):
+        """Check if any files with the same sha match the specified mtime"""
+        if abs(mtime - item.time) < 1:
+            return True
+        for link_mtime, in self.cur.execute("SELECT time FROM files WHERE sha1 = ? and size = ?", (item.sha1, item.size)):
+            if abs(mtime - link_mtime) < 1:
+                return True
+        return False
+
+    def verify(self, checksum, fix_mtime):
+        seen = set()
+        removed = set()
+        seen_dirs = {}
+        for root, dirs, files in os.walk(self.storage_root):
+            if root == self.storage_root:
+                dirs[:] = [_ for _ in dirs if _ != Config.STORAGE_BACKUP_DB_OLD]
+            dirs[:] = sorted(dirs)
+            for dirname in dirs:
+                seen_dirs[os.path.sep.join([root.replace(self.storage_root, ""), dirname])] = None
+            dir_has_files = False
+            if root == self.storage_root:
+                continue
+            for fname in sorted(files):
+                storage_path = os.path.join(root, fname)
+                path = storage_path.replace(self.storage_root, "")
+                if fname.endswith(".par2"):
+                    nonpar_storage_path = re.sub(r'\.(?:vol[^.]+\.)?par2$', r'', storage_path)
+                    nonpar_path = nonpar_storage_path.replace(self.storage_root, "")
+                    if nonpar_path in seen:
+                        continue
+                    if nonpar_path not in removed:
+                        self.cur.execute("SELECT path FROM files WHERE path = ? and storage_id= ?", (nonpar_path, self.storage_id))
+                        item = self.cur.fetchone()
+                        if item:
+                            seen.add(nonpar_path)
+                            continue
+                        logging.warning("Removing par file: %s", path)
+                    if not self.dry_run:
+                        os.unlink(storage_path)
+                    continue
+                self.cur.execute(f"SELECT { ', '.join(FileObj._fields) } FROM files WHERE path = ? and storage_id= ?", (path, self.storage_id))
+                item = self.cur.fetchone()
+                if item:
+                    item = FileObj(*item)
+                else:
+                    logging.warning("Path %s is not in the database. Removing", path)
+                    self.path_unlink(path)
+                    continue
+                lstat = blaine_lstat(storage_path)
+                if lstat.st_size != item.size:
+                    logging.warning("Size mismatch for %s: %s != %s. Removing", path, lstat.st_size, item.size)
+                elif not fix_mtime and not self.compare_mtime(lstat.st_mtime, item):
+                    logging.warning("MTime mismatch for %s: %s != %s. Removing", path, lstat.st_mtime, item.time)
+                elif checksum and calc_hash(storage_path) != item.sha1:  # FIXME: This should check for par2 correctability
+                    logging.warning("SHA1 mismatch for %s. Removing", path)
+                else:
+                    if fix_mtime and not self.compare_mtime(lstat.st_mtime, item):
+                        logging.warning("Correcting MTime of %s from %s -> %s", path, datetime.fromtimestamp(lstat.st_mtime).isoformat(), datetime.fromtimestamp(item.time).isoformat())
+                        if not self.dry_run:
+                            os.utime(storage_path, (lstat.st_atime, item.time), follow_symlinks=False)
+                    seen.add(path)
+                    dir_has_files = True
+                    continue
+                removed.add(path)
+                self.path_unlink(path)
+                self.remove_db(path)
+            if dir_has_files:
+                parts = root.replace(self.storage_root, "").split(os.path.sep)
+                prev = []
+                for part in parts:
+                    prev.append(part)
+                    dirname = os.path.sep.join(prev)
+                    if dirname in seen_dirs:
+                        seen_dirs[dirname] = True
+        to_delete = set()
+        for path, in self.cur.execute("SELECT path FROM files WHERE storage_id= ?", (self.storage_id,)):
+            if path in seen:
+                continue
+            if path.endswith('.par2'):
+                # FIXME: We didn't check par2 files above
+                logging.error("Can't verify par2 files")
+                continue
+            to_delete.add(path)
+        for path in sorted(to_delete):
+            logging.warning("Found %s in database but not on disk.  Removing", path)
+            self.remove_db(path)
+        for dirname in sorted([_k for _k, _v in seen_dirs.items() if _v is None], reverse=True):
+            logging.warning("Removing empty dir: %s", dirname)
+            if not self.dry_run:
+                try:
+                    os.rmdir(os.path.sep.join([self.storage_root, dirname]))
+                except OSError as _e:
+                    breakpoint()
+                    pass
+
 def simple_table(data, header=None):
     if not data:
         return
@@ -1032,7 +1128,7 @@ def backup_db(db_file):
     if not os.path.exists(db_file):
         return
     basedir, fname = os.path.split(db_file)
-    backup_dir = os.path.join(basedir, ".backup_db.old")
+    backup_dir = os.path.join(basedir, Config.STORAGE_BACKUP_DB_OLD)
     mtime = os.stat(db_file).st_mtime
     outfile = os.path.join(backup_dir, f"{fname}.{datetime.fromtimestamp(mtime).isoformat()}")
     if os.path.exists(outfile):
@@ -1134,7 +1230,7 @@ def parse_cmdline():
         parents=[common]
         )
     subparsers = parser.add_subparsers(required=True)
-    for subparser in (Backup, List, Admin):
+    for subparser in (Backup, List, Verify, Admin):
         subparser.add_parser(subparsers, common)
     args, remaining_argv = conf_parser.parse_known_args()
     if args.config_file:
@@ -1158,10 +1254,10 @@ def load_db(database, blaine_dir, dry_run, **blaine_args):
     """Connect to the database and initialize Blaine()"""
     cur = None
     backup = None
-    if dry_run:
+    if dry_run or not database:
         tmpdir = tempfile.TemporaryDirectory()
         tmpdb = f"{tmpdir.name}/database.sqlite"
-    if os.path.exists(database):
+    if database and os.path.exists(database):
         if dry_run:
             shutil.copyfile(database, tmpdb)
             cur = connect_db(tmpdb)
@@ -1173,12 +1269,16 @@ def load_db(database, blaine_dir, dry_run, **blaine_args):
         if not cur:
             dbfile = backup.get_storage_db_file()
             if os.path.exists(dbfile):
-                logging.warning("Did not find database %s.  Using database from backup", database)
-                if dry_run:
+                if database:
+                    logging.warning("Did not find database %s.  Using database from backup", database)
+                if dry_run or not database:
                     shutil.copyfile(dbfile, tmpdb)
                 else:
                     shutil.copyfile(dbfile, database)
-            if not dry_run:
+            elif not database:
+                logging.error("No database found on storage media")
+                raise ValueError
+            if database and not dry_run:
                 backup_db(database)
                 backup.cur = cur = connect_db(database)
             else:
@@ -1382,6 +1482,29 @@ class List:
             if backup:
                 backup.encrypt.stop()
 
+class Verify:
+    """Verify storage contents"""
+    @classmethod
+    def add_parser(cls, parser, common):
+        p_verify = parser.add_parser("verify", parents=[common], help="Verify storage content")
+        p_verify.set_defaults(func=cls.run)
+        p_verify.add_argument("--checksum", action="store_true", help="Verify checksums of storage files")
+        p_verify.add_argument("--no-fix_mtime", dest="fix_mtime", action="store_false", default=True, help="Don't fix mtime of files in archive")
+        p_verify.add_argument("--dry_run", action="store_true", help="Don't apply any changes")
+        p_verify.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
+
+    @staticmethod
+    def run(args):
+        # pass database = None to ignore the local database, and only act on the storage copy
+        with load_db(None, args.blaine_dir, args.dry_run,
+                     encrypt=args.encrypt) as (_cur, backup):
+            try:
+                backup.verify(args.checksum, args.fix_mtime)
+                backup.write_storage_db()
+                return True
+            except KeyboardInterrupt:
+                backup.write_storage_db()
+        return False
 class Admin:
     """Admin subcommand"""
     @classmethod
@@ -1421,7 +1544,7 @@ class Admin:
                     return True
                 if not any((args.apply_pending, args.remove_disk, args.remove_files)):
                     logging.error("No admin action specified")
-                    return False 
+                    return False
 
                 schema = get_schema(cur)
                 if schema != SCHEMA:
