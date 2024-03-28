@@ -1034,12 +1034,25 @@ class Blaine:
             dir_has_files = False
             if root == self.storage_root:
                 continue
+            has_par2 = {}
+            local_seen = set()
+            zero_size = set()
             for fname in sorted(files):
                 storage_path = os.path.join(root, fname)
-                path = storage_path.replace(self.storage_root, "")
+                path = storage_path[len(self.storage_root):]
                 if fname.endswith(".par2"):
-                    nonpar_storage_path = re.sub(r'\.(?:vol[^.]+\.)?par2$', r'', storage_path)
-                    nonpar_path = nonpar_storage_path.replace(self.storage_root, "")
+                    nonpar_fname = re.sub(r'\.(?:vol[^.]+\.)?par2$', r'', fname)
+                    nonpar_storage_path = os.path.join(root, nonpar_fname)
+                    nonpar_path = nonpar_storage_path[len(self.storage_root):]
+                    if nonpar_fname + ".par2" == fname:
+                        has_par2[nonpar_fname] = 0
+                    elif nonpar_fname in has_par2:
+                        has_par2[nonpar_fname] += 1
+                    else:
+                        logging.warning("Found par2 vol file with no matching par2 file: %s", path)
+                        if not self.dry_run:
+                            os.unlink(storage_path)
+                            continue
                     if nonpar_path in seen:
                         continue
                     if nonpar_path not in removed:
@@ -1072,14 +1085,23 @@ class Blaine:
                         logging.warning("Correcting MTime of %s from %s -> %s", path, datetime.fromtimestamp(lstat.st_mtime).isoformat(), datetime.fromtimestamp(item.time).isoformat())
                         if not self.dry_run:
                             os.utime(storage_path, (lstat.st_atime, item.time), follow_symlinks=False)
+                    if lstat.st_size == 0 or stat.S_ISLNK(lstat.st_mode):
+                        zero_size.add(fname)
+                    local_seen.add(fname)
                     seen.add(path)
                     dir_has_files = True
                     continue
                 removed.add(path)
                 self.path_unlink(path)
                 self.remove_db(path)
+            for fname in sorted(local_seen - zero_size - set(has_par2)):
+                logging.warning("Rebuilding missing par2 file for %s", os.path.join(root, fname))
+                self.calculate_par2(os.path.join(root, fname)[len(self.storage_root):])
+            for fname in sorted((_k for _k, _v in has_par2.items() if _v == 0)):
+                logging.warning("Found par2 with no vol files for %s", os.path.join(root, fname))
+                self.calculate_par2(os.path.join(root, fname)[len(self.storage_root):])
             if dir_has_files:
-                parts = root.replace(self.storage_root, "").split(os.path.sep)
+                parts = root[len(self.storage_root):].split(os.path.sep)
                 prev = []
                 for part in parts:
                     prev.append(part)
@@ -1492,12 +1514,18 @@ class Verify:
         p_verify.add_argument("--no-fix_mtime", dest="fix_mtime", action="store_false", default=True, help="Don't fix mtime of files in archive")
         p_verify.add_argument("--dry_run", action="store_true", help="Don't apply any changes")
         p_verify.add_argument("--blaine_dir", "--dest_dir", required=True, help="Directory to write files to")
+        p_verify.add_argument("--par2_threads", "--threads", default=multiprocessing.cpu_count(),
+                        type=int,  help="Enable encryption, using specificed key")
+        p_verify.add_argument("--par2_threshold", default=10_000_000, type=int,
+                            help="Files larger than this use a single multi-threaded par2 call instead"
+                                 " of using multiple single-threaded par2 calls")
 
     @staticmethod
     def run(args):
         # pass database = None to ignore the local database, and only act on the storage copy
         with load_db(None, args.blaine_dir, args.dry_run,
-                     encrypt=args.encrypt) as (_cur, backup):
+                 encrypt=args.encrypt,
+                 par2_threads=args.par2_threads, par2_threshold=args.par2_threshold) as (_cur, backup):
             try:
                 backup.verify(args.checksum, args.fix_mtime)
                 backup.write_storage_db()
