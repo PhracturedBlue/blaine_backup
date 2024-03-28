@@ -203,7 +203,7 @@ class Encrypt:
         if not os.path.lexists(encrypt_dir):
             if not self.encryption_key:
                 return self.storage_root
-            if os.path.lexists(storage_db) or glob.glob(os.path.join(self.storage_root,"*")):
+            if os.path.lexists(storage_db) or glob.glob(os.path.join(glob.escape(self.storage_root),"*")):
                 raise BackupException(f"Volume {self.storage_root} already contains "
                                       "unencrypted data, but encryption was requested")
             with self.create_keyfile() as keyfile:
@@ -282,7 +282,7 @@ class Par2Queue:
         if os.path.exists(path + ".par2"):
             lstat_p = blaine_lstat(path + ".par2")
             size += lstat_p.st_size
-            for par2path in glob.glob(f"{ path }.vol*.par2"):
+            for par2path in glob.glob(glob.escape(path) + ".vol*.par2"):
                 lstat_p = blaine_lstat(par2path)
                 size += lstat_p.st_size
         del self.jobs[pid]
@@ -518,7 +518,7 @@ class Blaine:
             os.rename(origpath, newpath)
             if os.path.exists(origpath + ".par2"):
                 os.rename(origpath + ".par2", newpath + ".par2")
-                for path in glob.glob(f"{ origpath }.vol*.par2"):
+                for path in glob.glob(glob.escape(origpath) + ".vol*.par2"):
                     npath = newpath + path[len(origpath):]
                     os.rename(path, npath)
         except Exception as _e:
@@ -540,11 +540,11 @@ class Blaine:
             os.link(origpath, newpath)
             if os.path.exists(origpath + ".par2"):
                 os.link(origpath + ".par2", newpath + ".par2")
-                for path in glob.glob(f"{ origpath }.vol*.par2"):
+                for path in glob.glob(glob.escape(origpath) + ".vol*.par2"):
                     npath = newpath + path[len(origpath):]
                     os.link(path, npath)
         except Exception as _e:
-            for _p in newpath, newpath + ".par2", glob.glob(f"{ newpath }.vol*.par2"):
+            for _p in newpath, newpath + ".par2", glob.glob(glob.escape(newpath) + ".vol*.par2"):
                 try:
                     os.unlink(newpath)
                 except Exception:
@@ -602,7 +602,7 @@ class Blaine:
                              follow_symlinks=False)
                 except Exception:
                     pass
-                os.utime(dest, (lstat.st_atime, lstat.st_mtime))
+                os.utime(dest, (lstat.st_atime, lstat.st_mtime), follow_symlinks=False)
             self.storage_added += lstat.st_size
         except Exception as _e:
             try:
@@ -621,7 +621,7 @@ class Blaine:
             lstat_p = blaine_lstat(storage_path + ".par2")
             os.unlink(storage_path + ".par2")
             self.storage_added -= lstat_p.st_size
-        for par2path in glob.glob(f"{ storage_path }.vol*.par2"):
+        for par2path in glob.glob(glob.escape(storage_path) + ".vol*.par2"):
             lstat_p = blaine_lstat(par2path)
             os.unlink(par2path)
             self.storage_added -= lstat_p.st_size
