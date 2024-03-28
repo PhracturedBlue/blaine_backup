@@ -73,7 +73,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-import tomllib
+import tomllib  # default only in python 3.11
 import uuid
 import signal
 import time
@@ -597,12 +597,12 @@ class Blaine:
                 sha1 = calc_symlink_hash(path)
             else:
                 sha1 = run_dc3dd(path, dest)
-                # Python doesn't provide 'lutime' function, so no easy way to update symlinks
                 try:
                     os.chown(dest, lstat.st_uid, lstat.st_gid,
                              follow_symlinks=False)
                 except Exception:
                     pass
+                # Python 3.11 provides 'lutime' functyionality with follow_symlinks=False
                 os.utime(dest, (lstat.st_atime, lstat.st_mtime), follow_symlinks=False)
             self.storage_added += lstat.st_size
         except Exception as _e:
