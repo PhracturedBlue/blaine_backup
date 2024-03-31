@@ -38,7 +38,7 @@ def setup_archive():
             storage['TDOBJ'] = tempfile.TemporaryDirectory()
             storage['PATH'] = storage['TDOBJ'].name
         if storage['ID']:
-            with open(os.path.join(storage['PATH'], ".backup_id"), "w") as _fh:
+            with open(os.path.join(storage['PATH'], blaine.Config.STORAGE_BACKUP_ID), "w") as _fh:
                 _fh.write(storage['ID'])
     yield
     for obj in STORAGE_DIRS:
@@ -163,9 +163,9 @@ def verify_archive(archive_dir, expected_file, storage_id, encrypt=None):
     seen = set()
     shamap = {}
     for root, dirs, files in os.walk(archive_dir):
-        dirs[:] = [_ for _ in dirs if _ != '.backup_db.old']
+        dirs[:] = [_ for _ in dirs if _ != blaine.Config.STORAGE_BACKUP_DB_OLD]
         for fname in files:
-            if root == archive_dir and fname in (".backup_id", ".backup_db.sqlite3"):
+            if root == archive_dir and fname in (blaine.Config.STORAGE_BACKUP_ID, blaine.Config.STORAGE_BACKUP_DB):
                 continue
             if fname.endswith('.par2'):
                 continue
@@ -287,7 +287,7 @@ def run_stage(monkeypatch, caplog, stage, archive, encrypt=None, config=None, pr
     verify_data(data_dir, db_file, EXCLUDE_FILE)
     with do_encrypt(encrypt, archive_dir) as storage_dir:
         verify_archive(storage_dir, expected_file, STORAGE_DIRS[archive]['ID'], encrypt)
-        verify_db(os.path.join(storage_dir, ".backup_db.sqlite3"),
+        verify_db(os.path.join(storage_dir, blaine.Config.STORAGE_BACKUP_DB),
               expected_file, STORAGE_DIRS[archive]['ID'])
     return history
 
@@ -319,7 +319,7 @@ def test_stage123_par2_secfs(monkeypatch, caplog):
 def test_write_storage_id():
     with tempfile.TemporaryDirectory() as _td:
         storage_id = blaine._set_storage_id(_td, create=True)
-        assert os.path.exists(os.path.join(_td, ".backup_id"))
+        assert os.path.exists(os.path.join(_td, blaine.Config.STORAGE_BACKUP_ID))
         storage_id2 = blaine._set_storage_id(_td)
         assert storage_id == storage_id2
 
