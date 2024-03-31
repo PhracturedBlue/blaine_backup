@@ -91,6 +91,7 @@ class Config:
     # PAR2_CREATE = "par2 c -r:PERCENT: -t:THREADS: :FILENAME:"
     PAR2_CREATE = ("parpar -s :BLOCKSIZE:b -r :PERCENT:% --slice-dist=pow2 -t:THREADS: "
                    "-o :FILENAME:.par2 :FILENAME:")
+    PAR2_RESTORE = ("par2 r -B:DESTDIR: :SRCFILE:.par2 :DESTFILE:")
     DC3DD = "dc3dd"
     DC3DD_HLOG = f"/tmp/dc3dd.log.{ os.getpid() }"
     # ENCRYPT_CREATE = "securefs create --keyfile :KEYFILE: :ENCRYPT_DIR:"
@@ -399,6 +400,21 @@ def upgrade_schema(cur, old_schema):
         raise BackupException(f"Unsupported old schema: {old_schema}")
     cur.execute(f"REPLACE INTO settings (key, value) VALUES('schema', { SCHEMA })")
 
+def par2_repair(src_file, dest):
+    """Try to correct corruption via PAR2 files"""
+    # Par2 creates a backup but does not tell us what it is called.  So work in a temp-dir
+    destdir = os.path.dirname(dest)
+    with tempfile.TemporaryDirectory(dir=destdir) as td_:
+        os.rename(dest, os.path.join(td_, os.path.basename(dest)))
+        cmdline = [_
+                   .replace(':DESTDIR:', td_)
+                   .replace(':SRCFILE:', src_file) 
+                   .replace(':DESTFILE:', os.path.basename(dest)) 
+                   for _ in Config.PAR2_RESTORE.split()]
+        res = subprocess.run(cmdline, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        os.rename(os.path.join(td_, os.path.basename(dest)), dest)
+        return res.returncode
+
 def run_dc3dd(src, dest):
     """Use dc3dd to do a copy + calc SHA1"""
     try:
@@ -674,10 +690,10 @@ class Blaine:
                       storage_id, action, path1, (f" to {path2}" if path2 else ""))
         if action not in ('RENAME', 'LINK', 'DELETE'):
             logging.error("Unknown action: (%s, %s, %s)", action, path1, path2)
-            raise Exception(f"unsupported action: { action }")
+            raise BackupException(f"unsupported action: { action }")
         if not path2 and action != 'DELETE':
             logging.error("No destination for action %s %s", action, path1)
-            raise Exception(f"No destination for action { action } { path1 }")
+            raise BackupException(f"No destination for action { action } { path1 }")
         self.cur.execute(
             "INSERT INTO actions (storage_id, action, path, target_path) VALUES (?, ?, ?, ?)",
             (storage_id, action, path1, f"{ path2 }" if path2 else "NULL"))
@@ -1252,7 +1268,7 @@ def parse_cmdline():
         parents=[common]
         )
     subparsers = parser.add_subparsers(required=True)
-    for subparser in (Backup, List, Verify, Admin):
+    for subparser in (Backup, Restore, List, Verify, Mount, Admin):
         subparser.add_parser(subparsers, common)
     args, remaining_argv = conf_parser.parse_known_args()
     if args.config_file:
@@ -1533,6 +1549,97 @@ class Verify:
             except KeyboardInterrupt:
                 backup.write_storage_db()
         return False
+
+class Restore:
+    """Restore file from backup"""
+    @classmethod
+    def add_parser(cls, parser, common):
+        p_restore = parser.add_parser("restore", parents=[common], help="Restore backed-up files")
+        p_restore.set_defaults(func=cls.run)
+        p_restore.add_argument('filter', metavar='PATH', nargs='+', help="Paths to restore (use glob syntax.  Note that '*' will match '/' too)")
+        p_restore.add_argument("--dest", required=True, help="Target directory to restore to")
+        p_restore.add_argument("--dry_run", help="Don't actually restore files")
+        p_restore.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
+
+    @staticmethod
+    def run(args):
+        """Restore files"""
+        with load_db(args.database, args.blaine_dir, dry_run=True,
+                     encrypt=args.encrypt) as (cur, backup):
+            try:
+                where = "(" + " OR ".join("(path GLOB ?)" for _ in args.filter) + ")"
+                sqlvars = args.filter
+                sql = f"SELECT { ', '.join(FileObj._fields) } FROM files WHERE {where}"
+                skipped = 0
+                coppied = 0
+                failed = 0
+                for row in cur.execute(sql, sqlvars):
+                    item = FileObj(**row)
+                    if item.storage_id != backup.storage_id:
+                        logging.warning("File %s is on volume %s.  Skipping", item.path, item.storage_id)
+                        skipped += 1
+                        continue
+                    src = backup.storage_path(item.path)
+                    dest = os.path.join(args.dest, item.path[1:] if item.path[0] == os.path.sep else item.path)
+                    if os.path.exists(dest):
+                        if args.overwrite:
+                            logging.debug("Overwriting %s", dest)
+                            if not args.dry_run:
+                                os.unlink(dest)
+                        else:
+                            logging.warning("Destination %s already exists.  Skipping", dest)
+                            skipped += 1
+                            continue
+                    if not args.dry_run:
+                        if os.path.islink(src):
+                            # Symlinks are restored as-is.  They will point to the original location which may not be inside 'dest'
+                            os.symlink(os.readlink(src), dest)
+                        else:
+                            sha1 = run_dc3dd(backup.storage_path(item.path), dest)
+                            if sha1 != item.sha1:
+                                logging.warning("SHA mismatch on %s.  Trying to repair with PAR2", item.path)
+                                if not par2_repair(src, dest):
+                                    logging.error("Failed to correct %s.  File is corrupted", item.path)
+                                    failed += 1
+                                    continue
+                    logging.debug("Copied %s to %s", src, dest)
+                    copied += 1
+                logging.info("Copied %d files", copied)
+                if skipped:
+                    logging.warning("Skipped %d files", skipped)
+                if failed:
+                    logging.error("Failed to restore %d files", failed)
+                return not failed
+            except KeyboardInterrupt:
+                return False 
+
+class Mount:
+    """Mount backup"""
+    @classmethod
+    def add_parser(cls, parser, common):
+        """commandline arguments"""
+        p_mount = parser.add_parser("mount", parents=[common], help="Mount commands")
+        p_mount.set_defaults(func=cls.run)
+
+    @staticmethod
+    def run(args):
+        """Entrypoint"""
+        backup = None
+        try:
+            backup = Blaine(None, args.blaine_dir, encrypt=args.encrypt, dry_run=True)
+            try:
+                while True:
+                     time.sleep(100)
+            except KeyboardInterrupt:
+                pass
+            return True
+        except BackupException as _e:
+            logging.error(str(_e))
+            return False
+        finally:
+            if backup:
+                backup.encrypt.stop()
+
 class Admin:
     """Admin subcommand"""
     @classmethod
